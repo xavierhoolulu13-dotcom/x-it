@@ -246,6 +246,7 @@ See [`.env.example`](.env.example) for the complete annotated list.
 | `NEXTAUTH_SECRET` | Yes | — | Session encryption secret (`openssl rand -hex 32`) |
 | `NEXTAUTH_URL` | No | — | Public app URL for OAuth callbacks |
 | `X_IT_DATA_DIR` | No | `./.x-it-data` | Durable state: store, workspaces, browser sessions |
+| `X_IT_FRAME_ANCESTORS` | No | `'self'` + preview hosts | Hosts allowed to embed the app (CSP `frame-ancestors`) |
 | `OPENAI_API_KEY` | No | — | Enables an OpenAI-compatible provider |
 | `OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `DEFAULT_MODEL` | No | `gpt-4o-mini` | Default model id |

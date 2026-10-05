@@ -6,14 +6,22 @@ const nextConfig = {
    * clickjacking protection on for every other origin.
    */
   async headers() {
-    const previewOrigin = process.env.X_IT_PREVIEW_ORIGIN;
-    const frameAncestors = ["'self'", "https://*.e2b.app", "https://*.arena.ai"];
-    if (previewOrigin) frameAncestors.push(previewOrigin);
+    /**
+     * Clickjacking protection lives in `frame-ancestors` only.
+     *
+     * X-Frame-Options is deliberately NOT sent: browsers let it override the CSP
+     * directive, so any host we allow to frame the app (a sandbox/preview proxy)
+     * would still be blocked. Override the allow-list with
+     * X_IT_FRAME_ANCESTORS="https://my-host" (space separated, CSP syntax).
+     */
+    const configured = process.env.X_IT_FRAME_ANCESTORS;
+    const frameAncestors = configured
+      ? ["'self'", ...configured.split(/\s+/).filter(Boolean)]
+      : ["'self'", "https://*.e2b.app", "https://*.arena.ai"];
 
     const securityHeaders = [
       { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-      { key: "X-Frame-Options", value: "SAMEORIGIN" },
       { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
       {
         key: "Content-Security-Policy",
