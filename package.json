@@ -1,6 +1,6 @@
 {
   "name": "x-it",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -12,9 +12,14 @@
     "db:migrate": "prisma migrate dev",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
-    "test": "vitest",
+    "test": "vitest run",
     "test:run": "vitest run",
-    "sandbox:build": "docker build -t x-it-sandbox ./sandbox"
+    "sandbox:build": "docker build -t x-it-sandbox ./sandbox",
+    "test:watch": "vitest",
+    "e2e": "node scripts/e2e-production.mjs",
+    "chromium:prepare": "node scripts/prepare-chromium.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run typecheck && npm run build && npm run test"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -41,6 +46,7 @@
     "@radix-ui/react-tabs": "^1.1.0",
     "@radix-ui/react-toast": "^1.2.1",
     "@radix-ui/react-tooltip": "^1.1.2",
+    "@sparticuz/chromium": "^153.0.0",
     "bcryptjs": "^2.4.3",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
@@ -49,9 +55,10 @@
     "dockerode": "^4.0.0",
     "lucide-react": "^0.441.0",
     "markdown-it": "^14.1.0",
-    "next": "14.2.14",
+    "next": "14.2.35",
     "next-auth": "^4.24.7",
     "prism-react-renderer": "^2.4.0",
+    "puppeteer-core": "^25.12.0",
     "react": "^18",
     "react-dom": "^18",
     "react-hook-form": "^7.53.0",
@@ -89,5 +96,6 @@
     "tsx": "^4.19.0",
     "typescript": "^5",
     "vitest": "^1.6.0"
-  }
+  },
+  "description": "Personal AI computer assistant: chat, real sandbox execution, headless browser automation, approvals and audit."
 }
