@@ -1,37 +1,46 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
+import { store } from "@/lib/db/store";
+import { getSandboxManager } from "@/lib/sandbox/manager";
+import { ok, fail, readJson, withAuth } from "@/lib/util/api";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 120;
 
 export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const { projectId, cpuLimit, memoryLimit } = body;
+  return withAuth(req, async (ctx) => {
+    const body = (await readJson<{ projectId?: string; recreate?: boolean }>(req)) || {};
+    const project =
+      (body.projectId ? store.getProject(body.projectId) : undefined) || store.listProjects(ctx.userId)[0];
 
-    if (!projectId) {
-      return NextResponse.json(
-        { error: "projectId is required" },
-        { status: 400 }
-      );
+    if (!project) return fail("No project available — create one first", 400);
+    if (project.userId !== ctx.userId && ctx.user.role !== "ADMIN") return fail("Forbidden", 403);
+
+    const manager = getSandboxManager();
+
+    if (body.recreate) {
+      for (const record of store.listSandboxRecords(ctx.userId).filter((s) => s.projectId === project.id)) {
+        const runtime = await manager.get(record.id);
+        if (runtime) await manager.destroy(runtime);
+      }
     }
 
-    // In production, this would use the SandboxManager to create a real Docker container
-    // For now, return a mock sandbox
-    const sandbox = {
-      id: `sandbox-${projectId}-${Date.now()}`,
-      projectId,
-      containerId: `mock-container-${Date.now()}`,
-      status: "running",
-      cpuLimit: cpuLimit || 2,
-      memoryLimit: memoryLimit || 2048,
-      diskLimit: 10240,
-      port: 8080 + Math.floor(Math.random() * 1000),
-      createdAt: new Date().toISOString(),
-    };
-
-    return NextResponse.json(sandbox);
-  } catch (error) {
-    console.error("Sandbox create error:", error);
-    return NextResponse.json(
-      { error: "Failed to create sandbox" },
-      { status: 500 }
-    );
-  }
+    try {
+      const runtime = await manager.ensure(ctx.userId, project.id);
+      return ok(
+        {
+          sandbox: {
+            id: runtime.id,
+            projectId: project.id,
+            backend: runtime.backend,
+            status: runtime.status,
+            workspaceDir: runtime.workspaceDir,
+            port: runtime.port,
+          },
+        },
+        { status: 201 }
+      );
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : "Failed to create sandbox", 500);
+    }
+  });
 }

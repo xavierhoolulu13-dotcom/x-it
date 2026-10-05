@@ -1,6 +1,6 @@
 "use client";
 
-import { type Message } from "@/lib/stores/chat-store";
+import { type ChatMessage as Message } from "@/lib/stores/chat-store";
 import { ToolCallCard } from "./tool-call-card";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -54,7 +54,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
               {isUser ? "You" : "AI Assistant"}
             </span>
             <span className="text-xs text-muted-foreground">
-              {new Date(message.timestamp).toLocaleTimeString()}
+              {new Date(message.createdAt).toLocaleTimeString()}
             </span>
           </div>
 

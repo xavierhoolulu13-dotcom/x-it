@@ -10,54 +10,74 @@ A full-stack web application combining AI chat, sandbox computer control, tool e
 |-------|-----------|
 | Frontend | Next.js 14 (App Router), TypeScript, Tailwind CSS |
 | Backend API | Next.js API Routes + Server Actions |
-| Database | PostgreSQL via Prisma ORM |
-| Real-time | Server-Sent Events (SSE) for streaming, WebSockets for terminal |
-| Sandbox | Docker containers (one per project) |
-| Auth | NextAuth.js with credentials + OAuth providers |
-| AI Providers | OpenAI-compatible API adapter layer |
+| Persistence | Durable JSON store (atomic writes) — `lib/db/store.ts`; Prisma schema for PostgreSQL deployments |
+| Real-time | Server-Sent Events (SSE) for chat streaming and tool events |
+| Sandbox | Pluggable backends: Docker containers (dockerode) or a hardened local backend |
+| Auth | NextAuth.js — credentials (bcrypt) + env-gated GitHub/Google OAuth |
+| Browser | Real headless Chromium via puppeteer-core |
+| AI Providers | OpenAI-compatible, Ollama, and an offline demo agent |
 
-## Monorepo Structure
+## Repository Structure
 
 ```
 x-it/
-├── app/                    # Next.js App Router
-│   ├── (auth)/             # Auth pages (login, register)
-│   ├── (dashboard)/        # Main app layout
-│   │   ├── chat/           # Chat interface
-│   │   ├── projects/       # Project management
-│   │   ├── settings/       # User settings
-│   │   └── admin/          # Admin dashboard
-│   ├── api/                # API routes
-│   │   ├── auth/           # Authentication endpoints
-│   │   ├── chat/           # Chat & streaming
-│   │   ├── projects/       # Project CRUD
-│   │   ├── sandbox/        # Sandbox management
-│   │   ├── tools/          # Tool execution
-│   │   └── admin/          # Admin endpoints
-│   └── layout.tsx
-├── components/             # React components
-│   ├── chat/               # Chat UI components
-│   ├── sidebar/            # Left sidebar
-│   ├── tools-panel/        # Right panel
-│   ├── terminal/           # Terminal emulator
-│   ├── file-explorer/      # File browser
-│   ├── browser-preview/    # Browser preview
-│   └── ui/                 # Shared UI components
-├── lib/                    # Shared libraries
-│   ├── db/                 # Prisma client & utilities
-│   ├── ai/                 # AI provider adapters
-│   ├── sandbox/            # Sandbox manager
-│   ├── tools/              # Tool definitions & executor
-│   ├── auth/               # Auth utilities
-│   └── utils/              # General utilities
-├── prisma/                 # Database schema & migrations
-├── sandbox/                # Sandbox Docker image
-├── public/                 # Static assets
-├── types/                  # TypeScript type definitions
-├── docker-compose.yml      # Docker Compose for development
-├── Dockerfile              # App Dockerfile
-└── tests/                  # Test files
+├── app/                        # Next.js App Router
+│   ├── (auth)/                 # login, register
+│   ├── (dashboard)/            # chat, settings (protected by middleware)
+│   ├── api/                    # REST + SSE endpoints (see API Contract)
+│   │   ├── auth/               # NextAuth + registration
+│   │   ├── chat/               # SSE agent stream
+│   │   ├── browser/            # browser sessions, actions, screenshots, content
+│   │   ├── sandbox/            # sandbox lifecycle
+│   │   ├── terminal/           # command execution
+│   │   ├── files/              # workspace file operations
+│   │   ├── tools/              # catalogue, execution, history
+│   │   ├── approvals/          # approval queue + decisions
+│   │   ├── audit/              # audit trail
+│   │   ├── preview/            # preview proxy
+│   │   ├── projects/           # projects + snapshots
+│   │   ├── health/, version/   # operations
+│   │   └── models/             # provider + model catalogue
+│   ├── layout.tsx
+│   └── page.tsx
+├── components/
+│   ├── auth/                   # AuthForm
+│   ├── chat/                   # message list, tool-call cards, input
+│   ├── sidebar/                # projects + conversations
+│   ├── tools-panel/            # tabs: tools, files, terminal, browser, approvals, audit
+│   ├── ui/                     # shared primitives
+│   ├── dashboard-shell.tsx     # layout composition
+│   └── top-bar.tsx             # model selector, status, stop button
+├── lib/
+│   ├── ai/                     # provider-adapter (OpenAI, Ollama, demo agent)
+│   ├── auth/                   # auth-options, passwords, session, secret
+│   ├── browser/                # chromium, engine, extract, types
+│   ├── db/                     # store (durable JSON) + Prisma client
+│   ├── hooks/                  # use-sandbox
+│   ├── runtime/                # paths
+│   ├── sandbox/                # docker-backend, local-backend, manager, types
+│   ├── stores/                 # zustand: chat, ui
+│   ├── tools/                  # definitions, policy, executor, approvals, errors
+│   └── util/                   # api helpers, rate limiting
+├── middleware.ts               # route protection
+├── scripts/
+│   ├── prepare-chromium.mjs    # resolve/extract Chromium
+│   └── e2e-production.mjs      # production E2E (headless Chromium)
+├── tests/                      # vitest suites
+├── sandbox/                    # sandbox container image
+├── prisma/                     # PostgreSQL schema (optional)
+├── Dockerfile                  # production image (Chromium + toolchain)
+└── docker-compose.yml
 ```
+
+## Runtime Data Model
+
+The running application persists through `lib/db/store.ts`, a durable JSON store with
+atomic writes covering: `users`, `projects`, `conversations`, `messages`, `toolCalls`,
+`approvals`, `auditLogs`, `snapshots`, `sandboxes` and `browserSessions`. Data lives in
+`X_IT_DATA_DIR` (default `./.x-it-data`) alongside `workspaces/`, `browser/` and the
+generated NextAuth secret. `prisma/schema.prisma` mirrors this model for PostgreSQL
+deployments.
 
 ## Database Schema (PostgreSQL + Prisma)
 
@@ -83,90 +103,71 @@ x-it/
 
 ## API Contract
 
+All `/api/*` routes (except auth, health and version) require a NextAuth session cookie
+or `Authorization: Bearer $X_IT_API_TOKEN`.
+
 ### Authentication
 ```
-POST   /api/auth/register     — Create account
-POST   /api/auth/login        — Sign in
-POST   /api/auth/logout       — Sign out
-GET    /api/auth/session      — Get current session
+POST  /api/auth/register                    — create account (rate limited)
+GET/POST /api/auth/[...nextauth]            — NextAuth sign-in/session/callbacks
 ```
 
-### Projects
+### Chat & conversations
 ```
-GET    /api/projects           — List user projects
-POST   /api/projects           — Create project
-GET    /api/projects/:id       — Get project details
-PATCH  /api/projects/:id       — Update project
-DELETE /api/projects/:id       — Delete project
-POST   /api/projects/:id/snapshot — Create snapshot
-GET    /api/projects/:id/snapshots — List snapshots
-POST   /api/projects/:id/rollback/:snapshotId — Rollback
+POST  /api/chat/stream                      — send message, receive SSE stream
+GET   /api/conversations                    — list conversations
+GET   /api/conversations/:id                — conversation with messages + tool calls
+PATCH /api/conversations/:id                — rename
+DELETE /api/conversations/:id               — delete
+GET   /api/models                           — available models + active provider
 ```
 
-### Conversations
+### Projects & snapshots
 ```
-GET    /api/projects/:pid/conversations        — List conversations
-POST   /api/projects/:pid/conversations        — Create conversation
-GET    /api/conversations/:id                   — Get conversation with messages
-PATCH  /api/conversations/:id                   — Rename/update
-DELETE /api/conversations/:id                   — Delete conversation
-GET    /api/conversations/:id/export            — Export conversation
+GET/POST /api/projects                      — list / create projects
+GET/PATCH/DELETE /api/projects/:id          — project detail
+GET/POST /api/projects/:id/snapshots        — list / capture workspace snapshot
+POST  /api/projects/:id/snapshots/:sid/restore — restore snapshot
 ```
 
-### Chat & Streaming
+### Sandbox & execution
 ```
-POST   /api/chat/stream        — Send message, get SSE stream
-GET    /api/chat/stream/:id    — Resume SSE stream
-```
-
-### Sandbox
-```
-POST   /api/sandbox/create     — Create/start sandbox for project
-GET    /api/sandbox/:id/status — Get sandbox status
-POST   /api/sandbox/:id/stop   — Stop sandbox
-DELETE /api/sandbox/:id        — Destroy sandbox
-GET    /api/sandbox/:id/preview — Get live preview URL
+GET   /api/sandbox                          — current sandbox for the active project
+POST  /api/sandbox/create                   — create/start (optional recreate)
+GET   /api/sandbox/:id/status               — status + backend
+POST  /api/sandbox/:id/stop                 — stop
+POST  /api/terminal/:sandboxId/exec         — run a command (403 when policy-blocked)
+POST  /api/files/:sandboxId/list|read|write|delete|mkdir|rename
+GET   /api/preview/:sandboxId/*             — proxy to a server running in the sandbox
 ```
 
-### Tools
+### Tools, approvals & audit
 ```
-POST   /api/tools/execute      — Execute a tool (with approval check)
-GET    /api/tools/history/:id  — Get tool call history
-POST   /api/tools/approve/:id  — Approve pending tool call
-POST   /api/tools/reject/:id   — Reject pending tool call
-POST   /api/tools/cancel/:id   — Cancel running tool call
-```
-
-### Files (inside sandbox)
-```
-GET    /api/files/:sandboxId/list      — List files
-GET    /api/files/:sandboxId/read      — Read file
-POST   /api/files/:sandboxId/write     — Write file
-POST   /api/files/:sandboxId/mkdir     — Create directory
-DELETE /api/files/:sandboxId/delete    — Delete file
-POST   /api/files/:sandboxId/rename    — Rename file
-GET    /api/files/:sandboxId/download  — Download file
-POST   /api/files/:sandboxId/upload    — Upload file
+GET   /api/tools                            — catalogue + permission tiers
+POST  /api/tools/execute                    — execute a tool directly
+GET   /api/tools/history                    — recent tool calls
+GET   /api/approvals                        — pending/decided approvals
+POST  /api/approvals/:id/decision           — { decision, reason? }
+POST  /api/approvals/:id/approve|reject     — convenience aliases
+GET   /api/audit                            — audit trail
 ```
 
-### Terminal
+### Browser automation
 ```
-POST   /api/terminal/:sandboxId/exec   — Execute command
-WS     /api/terminal/:sandboxId/stream — Live terminal stream
-```
-
-### Approvals
-```
-GET    /api/approvals                  — List pending approvals
-GET    /api/approvals/:id              — Get approval details
-POST   /api/approvals/:id/approve     — Approve action
-POST   /api/approvals/:id/reject      — Reject action
+GET   /api/browser/status                   — Chromium readiness
+POST  /api/browser/sessions                 — create session (name, url, viewport)
+GET   /api/browser/sessions/:id             — page state (url, title, elements, count)
+POST  /api/browser/sessions/:id/navigate    — navigate to a URL
+POST  /api/browser/sessions/:id/action      — click/type/scroll/back/forward/reload/viewport
+POST  /api/browser/sessions/:id/screenshot  — capture (png|jpeg, fullPage)
+GET   /api/browser/sessions/:id/screenshot  — screenshot bytes
+GET   /api/browser/sessions/:id/content     — html|text|markdown|links
 ```
 
-### Audit
+### Operations
 ```
-GET    /api/audit                      — List audit events
-GET    /api/audit/export               — Export audit log
+GET   /api/health                           — store, sandbox and AI checks
+GET   /api/version                          — version, milestones, features
 ```
 
 ## Tool System
@@ -175,19 +176,22 @@ GET    /api/audit/export               — Export audit log
 
 | Tool | Permission Level | Description |
 |------|-----------------|-------------|
-| `file_read` | Read-only | Read file contents |
-| `file_write` | Approval Required | Write/edit files |
-| `file_delete` | Approval Required | Delete files |
-| `file_list` | Read-only | List directory contents |
-| `terminal_exec` | Approval Required | Run shell commands |
-| `code_run` | Approval Required | Run Python/JS code |
-| `browser_navigate` | Approval Required | Browse web pages |
-| `browser_screenshot` | Read-only | Take screenshots |
-| `package_install` | Approval Required | Install packages |
-| `server_start` | Approval Required | Start dev servers |
-| `server_stop` | Approval Required | Stop dev servers |
-| `search_web` | Read-only | Web search |
-| `screenshot_desktop` | Read-only | Desktop screenshot |
+| `file_read` | read_only | Read file contents |
+| `file_list` | read_only | List files and directories |
+| `file_write` | approval_required | Write/overwrite a file |
+| `file_delete` | approval_required | Delete a file or directory |
+| `terminal_exec` | approval_required | Run a shell command |
+| `code_run` | approval_required | Run Python/JS/TS/bash/Ruby code |
+| `server_start` | approval_required | Start a long-running sandbox server |
+| `server_stop` | approval_required | Stop a sandbox server |
+| `browser_navigate` | approval_required | Navigate a browser session |
+| `browser_action` | approval_required | Click/type/scroll/back/forward |
+| `browser_screenshot` | read_only | Capture the current page |
+| `browser_extract` | read_only | Extract HTML/text/markdown/links |
+| `browser_close` | read_only | Close a browser session |
+| `search_web` | read_only | Search from inside the sandbox browser |
+| `snapshot_create` | read_only | Capture a workspace snapshot |
+| `host_escape`, `credential_access` | always_blocked | Never exposed to the model |
 
 ### Tool Call Flow
 ```
@@ -198,6 +202,54 @@ User Message → AI Model → Tool Call Request
       → [Approved] → Execute → Return result
       → [Rejected] → Notify AI → AI explains to user
     → [Blocked] → Reject immediately → Notify AI
+```
+
+## Browser Automation
+
+```
+Chat / Browser tab / REST API
+        │
+        ▼
+lib/browser/engine.ts   BrowserEngine
+  ├── session registry (per user, idle-shutdown after BROWSER_IDLE_SHUTDOWN_MS)
+  ├── navigate / click / type / scroll / viewport / back-forward
+  ├── screenshot (png|jpeg, fullPage)  ──┐
+  └── content (html|text|markdown|links) │
+        │                                │
+        ▼                                ▼
+lib/browser/chromium.ts          lib/browser/extract.ts
+  resolveChromium()  ─ scripts/prepare-chromium.mjs
+  chromiumEnv()      ─ LD_LIBRARY_PATH / FONTCONFIG_PATH / HOME
+  launchChromium()   ─ puppeteer-core, filtered launch flags
+        │
+        ▼
+normalizeUrl()  SSRF guard: http/https only, private ranges blocked
+                (opt-in via X_IT_ALLOW_PRIVATE_NETWORK for local previews)
+```
+
+Launch flags that break multi-context operation (`--single-process`,
+`--disable-web-security`, `--allow-running-insecure-content`) are stripped by
+`BLOCKED_FLAGS` in `dedupeArgs()`; without that, any second browser context dies with
+`Target closed`.
+
+## Tool Execution Path
+
+```
+app/api/chat/stream (agent loop)   app/api/tools/execute   automation
+                    \                    |                  /
+                     ▼                   ▼                 ▼
+                          lib/tools/executor.ts
+        ┌────────────────────────┼─────────────────────────┐
+        ▼                        ▼                         ▼
+  permission check          approval gate             audit log
+  (tool-definitions)     (approval-broker +        (store.addAuditLog,
+        │                 lib/tools/approvals)      secrets redacted)
+        ▼                        ▼
+  policy + path jail      user decision
+  (lib/tools/policy)      (/api/approvals/...)
+        │
+        ▼
+  SandboxManager → DockerBackend | LocalBackend
 ```
 
 ## Sandbox Architecture
@@ -214,7 +266,7 @@ User Message → AI Model → Tool Call Request
 │  │              │    │  │ (Project A)   │  │ │
 │  │  SSE Stream  │    │  │ Ubuntu + tools │  │ │
 │  │              │    │  │ Port 8080     │  │ │
-│  │  WebSocket   │    │  └───────────────┘  │ │
+│  │   SSE/Exec   │    │  └───────────────┘  │ │
 │  └─────────────┘    │                     │ │
 │                      │  ┌───────────────┐  │ │
 │  ┌─────────────┐    │  │ Sandbox #2    │  │ │
@@ -233,30 +285,56 @@ User Message → AI Model → Tool Call Request
 - Ports: Dynamically allocated (8080-9080 range)
 - User: Non-root sandbox user
 
+## Verification
+
+| Layer | Command | Result |
+|-------|---------|--------|
+| Types | `npm run typecheck` | 0 errors |
+| Build | `npm run build` | 45 routes |
+| Unit/integration | `npm run test` | 79 tests (real Chromium + real shell execution) |
+| Production E2E | `scripts/e2e-production.mjs` | 18/18 checks on `next start` |
+
 ## Security Model
 
-1. **Sandbox Isolation** — Each project runs in its own Docker container
-2. **Permission Levels** — Read-only, Approval Required, Always Blocked
-3. **Approval Queue** — Real-time approval UI for sensitive operations
-4. **Audit Logging** — Every action logged with timestamp, user, tool, args, result
-5. **Secret Management** — Encrypted env vars, never exposed to chat/logs
-6. **Rate Limiting** — Per-user and per-tool rate limits
-7. **Resource Limits** — CPU, memory, disk, network limits on sandboxes
-8. **Input Validation** — Strict validation on all API inputs
-9. **CORS/CSP** — Proper security headers
-10. **Session Security** — HTTP-only cookies, CSRF protection
+1. **Sandbox isolation** — Docker container per project when available; otherwise the
+   local backend confines every operation to the project workspace.
+2. **Path jail** — `resolveWorkspacePath()` rejects any path that escapes the workspace.
+3. **Command policy** — `checkCommand()` blocks destructive host commands, reverse
+   shells, credential reads and pipe-to-shell installs before execution.
+4. **Permission levels** — read_only, approval_required, always_blocked (the last tier is
+   never exposed to the model).
+5. **Approval queue** — Sensitive tools park the agent loop until the user decides;
+   requests expire after `APPROVAL_TIMEOUT_SECONDS`.
+6. **Audit logging** — Every tool call, approval and auth event is stored with user,
+   arguments and result; secret-looking arguments are redacted.
+7. **SSRF protection** — Browser navigation and the preview proxy reject non-HTTP
+   schemes and private network ranges unless explicitly opted in.
+8. **Secret management** — `NEXTAUTH_SECRET` is generated/stored locally; provider keys
+   stay server-side and are never sent to the model or written to the audit log.
+9. **Rate limiting** — Registration (10/hour/IP) and login (10/min per email+IP).
+10. **Session security** — HTTP-only JWT session cookies (30 days), CSRF protection via
+    NextAuth, middleware-enforced dashboard routes.
+11. **Input validation** — Zod schemas on API bodies.
 
 ## Build Order
 
 1. ✅ Architecture & project structure
-2. Database schema & Prisma setup
-3. Authentication system
-4. Project management
-5. Chat interface with streaming
-6. Sandbox manager
-7. File tools & terminal tools
-8. Approval & audit system
-9. Browser automation
-10. Live preview panel
-11. Version history & rollback
-12. Tests, docs, Docker Compose, security hardening
+2. ✅ Persistence layer (durable JSON store + Prisma schema for Postgres)
+3. ✅ Authentication system (v2)
+4. ✅ Project management
+5. ✅ Chat interface with streaming and the agent tool loop (v3)
+6. ✅ Sandbox manager (docker + local backends)
+7. ✅ File tools & terminal tools
+8. ✅ Approval & audit system
+9. ✅ Browser automation (v2)
+10. ✅ Live preview proxy
+11. ✅ Snapshots & restore
+12. ✅ Tests, docs, Docker, security hardening (v3)
+
+## Release History
+
+| Tag | Milestone |
+|-----|-----------|
+| `v1.0.0` | Chat UI, tool catalogue, approvals UI |
+| `v2.0.0` | Real authentication + real browser automation |
+| `v3.0.0` | Full completion: real execution, providers, approvals, audit, tests, E2E |

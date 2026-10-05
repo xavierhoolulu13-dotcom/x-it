@@ -1,118 +1,172 @@
 "use client";
 
-import { useSandboxStore, type FileNode } from "@/lib/stores/sandbox-store";
-import {
-  File,
-  Folder,
-  FolderOpen,
-  ChevronRight,
-  ChevronDown,
-} from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
+import { useSandbox } from "@/lib/hooks/use-sandbox";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { File, Folder, RefreshCw, Save, X } from "lucide-react";
 
-function FileTreeNode({ node, depth = 0 }: { node: FileNode; depth?: number }) {
-  const [isOpen, setIsOpen] = useState(node.isExpanded || false);
-  const { setActiveFile, activeFilePath } = useSandboxStore();
+interface FileEntry {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  size: number;
+  modifiedAt: string;
+}
 
-  const handleClick = () => {
-    if (node.type === "directory") {
-      setIsOpen(!isOpen);
-    } else {
-      setActiveFile(node.path);
+export function FilesTab() {
+  const { sandbox, sandboxId, backend, loading: sandboxLoading, error: sandboxError } = useSandbox();
+  const [files, setFiles] = useState<FileEntry[]>([]);
+  const [path, setPath] = useState(".");
+  const [loading, setLoading] = useState(false);
+  const [openFile, setOpenFile] = useState<{ path: string; content: string; original: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(
+    async (target = path) => {
+      if (!sandboxId) return;
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/files/${sandboxId}/list?path=${encodeURIComponent(target)}&maxDepth=2`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed to list files");
+        setFiles(data.files || []);
+        setPath(target);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to list files");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [path, sandboxId]
+  );
+
+  useEffect(() => {
+    if (sandboxId) void load(".");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sandboxId]);
+
+  const openFilePath = async (filePath: string) => {
+    if (!sandboxId) return;
+    try {
+      const res = await fetch(`/api/files/${sandboxId}/read?path=${encodeURIComponent(filePath)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to read file");
+      setOpenFile({ path: filePath, content: data.content, original: data.content });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to read file");
     }
   };
 
-  const isActive = activeFilePath === node.path;
+  const saveFile = async () => {
+    if (!sandboxId || !openFile) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/files/${sandboxId}/write`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: openFile.path, content: openFile.content }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save");
+      setOpenFile({ ...openFile, original: openFile.content });
+      toast.success(`Saved ${openFile.path}`);
+      void load(path);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (openFile) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+          <span className="flex-1 truncate text-xs font-medium">{openFile.path}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            disabled={saving || openFile.content === openFile.original}
+            onClick={() => void saveFile()}
+          >
+            <Save className="h-3 w-3" />
+          </Button>
+          <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => setOpenFile(null)}>
+            <X className="h-3 w-3" />
+          </Button>
+        </div>
+        <textarea
+          value={openFile.content}
+          onChange={(e) => setOpenFile({ ...openFile, content: e.target.value })}
+          spellCheck={false}
+          className="flex-1 resize-none bg-black/95 p-3 font-mono text-xs text-green-300 outline-none"
+        />
+      </div>
+    );
+  }
 
   return (
-    <div>
-      <button
-        onClick={handleClick}
-        className={`flex w-full items-center gap-1.5 py-1 px-2 text-sm hover:bg-accent/50 transition-colors ${
-          isActive ? "bg-accent" : ""
-        }`}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
-      >
-        {node.type === "directory" ? (
-          <>
-            {isOpen ? (
-              <ChevronDown className="h-3 w-3 text-muted-foreground" />
-            ) : (
-              <ChevronRight className="h-3 w-3 text-muted-foreground" />
-            )}
-            {isOpen ? (
-              <FolderOpen className="h-4 w-4 text-primary" />
-            ) : (
-              <Folder className="h-4 w-4 text-primary" />
-            )}
-          </>
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+        <Input
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void load(path);
+          }}
+          className="h-7 flex-1 font-mono text-xs"
+        />
+        <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => void load(path)}>
+          <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+        </Button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-2">
+        {sandboxLoading ? (
+          <p className="p-3 text-xs text-muted-foreground">Preparing sandbox…</p>
+        ) : sandboxError ? (
+          <p className="p-3 text-xs text-destructive">{sandboxError}</p>
+        ) : files.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <span className="text-4xl">📁</span>
+            <p className="mt-3 text-sm font-medium">Empty workspace</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Ask the assistant to create a file, or write one from the terminal.
+            </p>
+          </div>
         ) : (
-          <>
-            <span className="w-3" />
-            <File className="h-4 w-4 text-muted-foreground" />
-          </>
+          <div className="space-y-0.5">
+            {files.map((file) => (
+              <button
+                key={file.path}
+                onClick={() => (file.type === "file" ? void openFilePath(file.path) : void load(file.path))}
+                className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent"
+              >
+                {file.type === "directory" ? (
+                  <Folder className="h-3.5 w-3.5 text-status-thinking" />
+                ) : (
+                  <File className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+                <span className="flex-1 truncate">{file.name}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {file.type === "file" ? `${Math.max(1, Math.round(file.size / 1024))}kb` : ""}
+                </span>
+              </button>
+            ))}
+          </div>
         )}
-        <span className="truncate">{node.name}</span>
-      </button>
-      {node.type === "directory" && isOpen && node.children && (
-        <div>
-          {node.children.map((child) => (
-            <FileTreeNode key={child.path} node={child} depth={depth + 1} />
-          ))}
+      </div>
+
+      {sandbox && (
+        <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
+          {backend} · {sandbox.workspaceDir}
         </div>
       )}
     </div>
   );
 }
 
-export function FilesTab() {
-  const { fileTree, activeFilePath, fileContents } = useSandboxStore();
-  const activeContent = activeFilePath ? fileContents[activeFilePath] : null;
-
-  if (fileTree.length === 0) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center p-4 text-center">
-        <span className="text-4xl">📁</span>
-        <p className="mt-3 text-sm font-medium">No files yet</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Files will appear here when the AI creates or accesses files in the sandbox.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full">
-      {/* File Tree */}
-      <div className="w-1/2 overflow-y-auto border-r border-border">
-        {fileTree.map((node) => (
-          <FileTreeNode key={node.path} node={node} />
-        ))}
-      </div>
-
-      {/* File Preview */}
-      <div className="w-1/2 overflow-y-auto p-3">
-        {activeFilePath ? (
-          <div>
-            <div className="mb-2 text-xs font-medium text-muted-foreground truncate">
-              {activeFilePath}
-            </div>
-            {activeContent !== null ? (
-              <pre className="whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs font-mono">
-                {activeContent}
-              </pre>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Select a file to view its contents
-              </p>
-            )}
-          </div>
-        ) : (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            Select a file to preview
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+export default FilesTab;

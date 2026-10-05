@@ -55,3 +55,14 @@ docker-compose.override.yml
 *.avi
 *.zip
 !sandbox/*.zip
+# X-IT runtime data (sandboxes, browser profiles, local state)
+.x-it-data/
+artifacts/
+
+# Test output
+test-results/
+playwright-report/
+*.log
+
+# TypeScript incremental build info
+*.tsbuildinfo
