@@ -1,0 +1,240 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum PermissionLevel {
+  READ_ONLY
+  APPROVAL_REQUIRED
+  ALWAYS_BLOCKED
+}
+
+enum ToolStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REJECTED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum SandboxStatus {
+  CREATING
+  RUNNING
+  STOPPED
+  ERROR
+  DESTROYED
+}
+
+enum ConversationStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  hashedPassword  String?
+  role            UserRole  @default(USER)
+  avatar          String?
+  settings        Json      @default("{}")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  sessions        Session[]
+  projects        Project[]
+  auditLogs       AuditLog[]
+  approvalsGiven  Approval[]   @relation("ApprovalUser")
+  messages        Message[]
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Project {
+  id              String    @id @default(cuid())
+  name            String
+  description     String?
+  userId          String
+  settings        Json      @default("{}")
+  systemPrompt    String?   @db.Text
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversations   Conversation[]
+  sandboxes       Sandbox[]
+  snapshots       FileSnapshot[]
+  templates       ProjectTemplate[]
+
+  @@index([userId])
+}
+
+model Conversation {
+  id              String             @id @default(cuid())
+  title           String
+  projectId       String
+  status          ConversationStatus @default(ACTIVE)
+  modelId         String?
+  temperature     Float              @default(0.7)
+  maxTokens       Int                @default(4096)
+  systemPrompt    String?            @db.Text
+  metadata        Json               @default("{}")
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  project         Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages        Message[]
+
+  @@index([projectId])
+  @@index([updatedAt(sort: Desc)])
+}
+
+model Message {
+  id              String      @id @default(cuid())
+  conversationId  String
+  role            String      // "user", "assistant", "system", "tool"
+  content         String      @db.Text
+  userId          String?
+  modelId         String?
+  tokenCount      Int?
+  metadata        Json        @default("{}")
+  createdAt       DateTime    @default(now())
+
+  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user            User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  toolCalls       ToolCall[]
+
+  @@index([conversationId, createdAt])
+  @@index([userId])
+}
+
+model ToolCall {
+  id              String        @id @default(cuid())
+  messageId       String
+  toolName        String
+  arguments       Json          @default("{}")
+  result          String?       @db.Text
+  error           String?       @db.Text
+  status          ToolStatus    @default(PENDING)
+  startedAt       DateTime?
+  completedAt     DateTime?
+  duration        Int?          // milliseconds
+  sandboxId       String?
+  createdAt       DateTime      @default(now())
+
+  message         Message       @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  approval        Approval?
+
+  @@index([messageId])
+  @@index([status])
+  @@index([sandboxId])
+}
+
+model Approval {
+  id              String         @id @default(cuid())
+  toolCallId      String         @unique
+  status          ApprovalStatus @default(PENDING)
+  reason          String?
+  userId          String
+  decidedAt       DateTime?
+  expiresAt       DateTime
+  createdAt       DateTime       @default(now())
+
+  toolCall        ToolCall       @relation(fields: [toolCallId], references: [id], onDelete: Cascade)
+  user            User           @relation("ApprovalUser", fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([expiresAt])
+}
+
+model Sandbox {
+  id              String        @id @default(cuid())
+  projectId       String
+  containerId     String?
+  containerName   String?
+  status          SandboxStatus @default(CREATING)
+  baseImage       String        @default("x-it-sandbox:latest")
+  cpuLimit        Int           @default(2)       // cores
+  memoryLimit     Int           @default(2048)    // MB
+  diskLimit       Int           @default(10240)   // MB
+  portRange       Json          @default("{}")    // mapped ports
+  environment     Json          @default("{}")    // env vars (encrypted)
+  lastActiveAt    DateTime      @default(now())
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  project         Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  toolCalls       ToolCall[]
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model FileSnapshot {
+  id              String    @id @default(cuid())
+  projectId       String
+  name            String
+  description     String?
+  filePaths       Json      @default("[]")    // list of file paths included
+  fileContents    Json      @default("{}")    // path -> content mapping
+  createdAt       DateTime  @default(now())
+
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt(sort: Desc)])
+}
+
+model ProjectTemplate {
+  id              String    @id @default(cuid())
+  name            String    @unique
+  description     String?
+  category        String?
+  fileTree        Json      @default("{}")    // template file structure
+  settings        Json      @default("{}")
+  isPublic        Boolean   @default(true)
+  projectId       String?
+  createdAt       DateTime  @default(now())
+
+  project         Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model AuditLog {
+  id              String    @id @default(cuid())
+  userId          String
+  action          String
+  resource        String
+  resourceId      String?
+  details         Json      @default("{}")
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime  @default(now())
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action])
+  @@index([resource, resourceId])
+}

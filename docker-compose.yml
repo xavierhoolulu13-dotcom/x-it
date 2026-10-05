@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  # Main application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/xit
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-super-secret-change-me}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-gpt-4}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - SANDBOX_BASE_IMAGE=x-it-sandbox:latest
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-change-this-key-in-production}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - app-data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # PostgreSQL database
+  db:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=xit
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Sandbox base image builder
+  sandbox-builder:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    image: x-it-sandbox:latest
+    # This service just builds the image; it doesn't run
+    entrypoint: ["echo", "Sandbox image built successfully"]
+
+volumes:
+  postgres-data:
+  app-data:
