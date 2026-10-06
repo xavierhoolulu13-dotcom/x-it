@@ -152,6 +152,10 @@ backend instead.
 - **Email:** `demo@xit.dev`
 - **Password:** `demo1234`
 
+Set `X_IT_DEMO_AUTOLOGIN=true` to skip the login step entirely: the landing page
+redirects to `/demo`, signs into that demo account and drops you in the dashboard.
+It never touches an existing session and only ever authenticates the demo account.
+
 ### AI provider
 
 X-IT works with no credentials at all: without a provider it runs the **demo agent**,
@@ -247,6 +251,7 @@ See [`.env.example`](.env.example) for the complete annotated list.
 | `NEXTAUTH_URL` | No | — | Public app URL for OAuth callbacks |
 | `X_IT_DATA_DIR` | No | `./.x-it-data` | Durable state: store, workspaces, browser sessions |
 | `X_IT_FRAME_ANCESTORS` | No | `'self'` + preview hosts | Hosts allowed to embed the app (CSP `frame-ancestors`) |
+| `X_IT_DEMO_AUTOLOGIN` | No | `false` | `true` makes `/` sign straight into the demo account (zero-click demos) |
 | `OPENAI_API_KEY` | No | — | Enables an OpenAI-compatible provider |
 | `OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `DEFAULT_MODEL` | No | `gpt-4o-mini` | Default model id |

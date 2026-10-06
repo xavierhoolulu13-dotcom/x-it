@@ -19,7 +19,8 @@
     "e2e": "node scripts/e2e-production.mjs",
     "chromium:prepare": "node scripts/prepare-chromium.mjs",
     "typecheck": "tsc --noEmit",
-    "verify": "npm run typecheck && npm run build && npm run test"
+    "verify": "npm run typecheck && npm run build && npm run test",
+    "preview": "bash scripts/start-preview.sh"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

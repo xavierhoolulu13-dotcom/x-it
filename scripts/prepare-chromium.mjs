@@ -71,7 +71,9 @@ async function main() {
         const pkgRoot = dirname(dirname(pkgEntry));
         const archive = join(pkgRoot, "bin", "al2023.tar.br");
         if (existsSync(archive)) {
-          const { inflate } = await import("@sparticuz/chromium/build/lambdafs.js");
+          // `inflate` is re-exported from the package root; the internal build
+          // path is not reachable through the package's `exports` map.
+          const { inflate } = await import("@sparticuz/chromium");
           await inflate(archive);
         }
       } catch (error) {
