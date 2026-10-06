@@ -1,168 +1,311 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { store, DEMO_PROJECT_ID } from "@/lib/db/store";
+import { requireAuth, UnauthorizedError } from "@/lib/auth/session";
+import { resolveProvider, type AIMessage } from "@/lib/ai/provider-adapter";
+import { toProviderTools } from "@/lib/tools/tool-definitions";
+import { executeTool } from "@/lib/tools/executor";
+import { getSandboxManager, type SandboxRuntime } from "@/lib/sandbox/manager";
+import { getBrowserEngine } from "@/lib/browser/engine";
 
-// Simulated AI streaming endpoint
-// In production, this connects to the AI provider adapter layer
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const maxDuration = 300;
+
+const bodySchema = z.object({
+  message: z.string().min(1).max(20_000),
+  conversationId: z.string().optional(),
+  projectId: z.string().optional(),
+  model: z.string().optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(64).max(32_000).optional(),
+  systemPrompt: z.string().max(8000).optional(),
+  autoApprove: z.boolean().optional(),
+  maxSteps: z.number().int().min(1).max(12).optional(),
+});
+
+const DEFAULT_SYSTEM_PROMPT = `You are X-IT, a personal AI computer assistant running inside a web workspace.
+
+You have real tools:
+- file_read / file_write / file_delete / file_list — operate on the sandbox workspace
+- terminal_exec — run shell commands in the sandbox
+- code_run — run python / javascript / typescript / bash / ruby snippets
+- browser_navigate / browser_action / browser_screenshot / browser_extract — drive a real headless Chromium browser
+- search_web — search from that browser
+- server_start / server_stop — run long-lived processes and get a preview URL
+- snapshot_create — checkpoint the workspace
+
+Rules:
+1. Do the work with tools instead of describing it. Never claim a file was written or a page was opened unless a tool call confirms it.
+2. Sensitive actions (writing files, running commands, driving the browser) require user approval — that is handled for you; just call the tool.
+3. Read tool output before responding. Report real results, including errors, plainly and briefly.
+4. Prefer relative paths inside the workspace (e.g. ./index.html).`;
+
 export async function POST(req: NextRequest) {
+  let ctx;
   try {
-    const body = await req.json();
-    const { message, model, temperature, maxTokens } = body;
-
-    if (!message) {
-      return NextResponse.json({ error: "Message is required" }, { status: 400 });
-    }
-
-    // Create a streaming response
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        // Simulate AI thinking
-        const sendEvent = (data: Record<string, unknown>) => {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-        };
-
-        sendEvent({ type: "status", status: "thinking" });
-
-        // Simulate delay
-        await new Promise((r) => setTimeout(r, 500));
-
-        // Check if message looks like it needs tool use
-        const needsTools = detectToolNeeds(message);
-
-        if (needsTools.length > 0) {
-          // Send tool call events
-          for (const tool of needsTools) {
-            sendEvent({
-              type: "tool_call",
-              id: `tc-${Date.now()}`,
-              toolName: tool.name,
-              arguments: tool.args,
-              reason: tool.reason,
-            });
-
-            sendEvent({ type: "status", status: "waiting" });
-            await new Promise((r) => setTimeout(r, 1000));
-
-            sendEvent({
-              type: "tool_result",
-              toolCallId: `tc-${Date.now() - 1}`,
-              result: tool.mockResult,
-            });
-
-            sendEvent({ type: "status", status: "running" });
-            await new Promise((r) => setTimeout(r, 300));
-          }
-        }
-
-        // Generate and stream the response text
-        const response = generateResponse(message, needsTools);
-        const words = response.split(" ");
-
-        for (let i = 0; i < words.length; i++) {
-          const chunk = i === 0 ? words[i] : " " + words[i];
-          sendEvent({ type: "text", content: chunk });
-          await new Promise((r) => setTimeout(r, 30 + Math.random() * 50));
-        }
-
-        sendEvent({ type: "status", status: "completed" });
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    });
+    ctx = await requireAuth(req);
   } catch (error) {
-    console.error("Chat stream error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    if (error instanceof UnauthorizedError) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    throw error;
   }
-}
 
-function detectToolNeeds(message: string) {
-  const lower = message.toLowerCase();
-  const tools: {
-    name: string;
-    args: Record<string, unknown>;
-    reason: string;
-    mockResult: string;
-  }[] = [];
+  const body = await req.json().catch(() => null);
+  const parsed = bodySchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid request", details: parsed.error.flatten() }, { status: 400 });
+  }
 
-  if (lower.includes("file") || lower.includes("create") || lower.includes("write")) {
-    tools.push({
-      name: "file_write",
-      args: { path: "/sandbox/project/index.html", content: "<!DOCTYPE html>..." },
-      reason: "Creating the requested file in the sandbox",
-      mockResult: "File written successfully: /sandbox/project/index.html",
+  const input = parsed.data;
+
+  // ---------------------------------------------------------------- context
+  let project = input.projectId ? store.getProject(input.projectId) : undefined;
+  if (!project) {
+    project =
+      store.listProjects(ctx.userId)[0] ||
+      store.getProject(DEMO_PROJECT_ID) ||
+      store.createProject({ name: "Default Project", userId: ctx.userId });
+  }
+
+  let conversation = input.conversationId ? store.getConversation(input.conversationId) : undefined;
+  if (conversation && conversation.userId !== ctx.userId && ctx.user.role !== "ADMIN") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  if (!conversation) {
+    conversation = store.createConversation({
+      title: input.message.slice(0, 60),
+      projectId: project.id,
+      userId: ctx.userId,
+      modelId: input.model,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens,
+      systemPrompt: project.systemPrompt,
     });
   }
 
-  if (lower.includes("run") || lower.includes("execute") || lower.includes("command")) {
-    tools.push({
-      name: "terminal_exec",
-      args: { command: "echo 'Hello from sandbox'" },
-      reason: "Running the requested command in the sandbox",
-      mockResult: "Hello from sandbox\n[exit code: 0]",
-    });
+  // Persist the user's message immediately so history survives reloads.
+  store.createMessage({
+    conversationId: conversation.id,
+    role: "user",
+    content: input.message,
+    userId: ctx.userId,
+  });
+
+  const { provider, model, demoMode } = resolveProvider(input.model || conversation.modelId);
+
+  // Sandbox + browser are shared across the tool loop.
+  let sandbox: SandboxRuntime | null = null;
+  try {
+    sandbox = await getSandboxManager().ensure(ctx.userId, project.id);
+  } catch (error) {
+    console.error("[chat] sandbox unavailable:", error instanceof Error ? error.message : error);
   }
 
-  if (lower.includes("python") || lower.includes("script")) {
-    tools.push({
-      name: "code_run",
-      args: { language: "python", code: "print('Hello from Python')" },
-      reason: "Executing Python code in the sandbox",
-      mockResult: "Hello from Python\n[exit code: 0]",
-    });
-  }
+  const encoder = new TextEncoder();
+  const abortController = new AbortController();
+  req.signal.addEventListener("abort", () => abortController.abort());
 
-  if (lower.includes("browse") || lower.includes("website") || lower.includes("url")) {
-    tools.push({
-      name: "browser_navigate",
-      args: { url: "https://example.com" },
-      reason: "Navigating to the requested URL",
-      mockResult: "Navigated to https://example.com - Page loaded successfully",
-    });
-  }
+  const stream = new ReadableStream({
+    async start(controller) {
+      let closed = false;
+      const send = (event: Record<string, unknown>) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
+        }
+      };
 
-  if (lower.includes("list") || lower.includes("directory") || lower.includes("folder")) {
-    tools.push({
-      name: "file_list",
-      args: { path: "/sandbox/project" },
-      reason: "Listing files in the project directory",
-      mockResult: "index.html\ncss/style.css\njs/app.js\nREADME.md",
-    });
-  }
+      const finish = () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
 
-  return tools;
-}
+      try {
+        send({
+          type: "conversation",
+          conversationId: conversation!.id,
+          title: conversation!.title,
+          projectId: project!.id,
+        });
+        send({ type: "status", status: "thinking", model, provider: provider.name, demoMode });
 
-function generateResponse(
-  message: string,
-  toolsUsed: { name: string; mockResult: string }[]
-): string {
-  const lower = message.toLowerCase();
+        const history: AIMessage[] = store
+          .listMessages(conversation!.id)
+          .slice(-40)
+          .map((m) => ({ role: m.role, content: m.content }) as AIMessage);
 
-  if (toolsUsed.length > 0) {
-    const toolSummary = toolsUsed
-      .map((t) => `- **${t.name}**: ${t.mockResult}`)
-      .join("\n");
+        const systemPrompt =
+          input.systemPrompt || conversation!.systemPrompt || project!.systemPrompt || DEFAULT_SYSTEM_PROMPT;
 
-    return `I've completed the requested operations using the sandbox environment. Here's a summary of what I did:\n\n${toolSummary}\n\nAll operations were performed inside an isolated sandbox container. The host machine was not affected.\n\nIs there anything else you'd like me to do?`;
-  }
+        const messages: AIMessage[] = [{ role: "system", content: systemPrompt }, ...history];
+        const tools = toProviderTools();
+        const maxSteps = input.maxSteps ?? 6;
+        let fullText = "";
+        const executedCalls: { id: string; toolName: string; ok: boolean; output: string }[] = [];
+        const toolCallIds: string[] = [];
 
-  if (lower.includes("hello") || lower.includes("hi")) {
-    return "Hello! I'm your AI computer assistant. I can help you with:\n\n- **Write and edit files** in an isolated sandbox\n- **Run code** in Python, JavaScript, and more\n- **Execute shell commands** with your approval\n- **Browse websites** and take screenshots\n- **Build applications** from natural language descriptions\n\nWhat would you like to work on?";
-  }
+        for (let step = 0; step < maxSteps; step++) {
+          if (abortController.signal.aborted) break;
 
-  if (lower.includes("help")) {
-    return "Here's what I can do:\n\n### File Operations\n- Create, read, edit, and delete files\n- Organize projects into directories\n\n### Code Execution\n- Run Python, JavaScript, and other languages\n- Install packages (with your approval)\n\n### Terminal\n- Execute shell commands\n- Monitor running processes\n\n### Browser Automation\n- Navigate to websites\n- Take screenshots\n- Extract content\n\n### App Building\n- Generate complete projects from descriptions\n- Provide live previews\n- Version history and rollback\n\nAll actions are performed in an **isolated sandbox** for your safety. I'll always ask for permission before potentially destructive operations.\n\nWhat would you like to do?";
-  }
+          const toolCalls: { id: string; name: string; args: Record<string, unknown> }[] = [];
+          let stepText = "";
 
-  return `I understand you're asking about: "${message}"\n\nI'm ready to help! To give you the best response, I may need to:\n\n1. Use tools in the sandbox environment\n2. Write or modify files\n3. Execute code or commands\n\nJust let me know what you'd like to accomplish, and I'll create a plan and walk you through it step by step. I'll always ask for your approval before performing any sensitive operations.`;
+          for await (const chunk of provider.chat({
+            model,
+            messages,
+            tools,
+            temperature: input.temperature ?? conversation!.temperature,
+            maxTokens: input.maxTokens ?? conversation!.maxTokens,
+            signal: abortController.signal,
+          })) {
+            if (chunk.type === "text" && chunk.content) {
+              stepText += chunk.content;
+              fullText += chunk.content;
+              send({ type: "text", content: chunk.content });
+            } else if (chunk.type === "status" && chunk.status) {
+              send({ type: "status", status: chunk.status });
+            } else if (chunk.type === "tool_call" && chunk.toolCall) {
+              const call = chunk.toolCall;
+              let args: Record<string, unknown> = {};
+              try {
+                args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+              } catch {
+                args = { _raw: call.function.arguments };
+              }
+              toolCalls.push({ id: call.id, name: call.function.name, args });
+            } else if (chunk.type === "error" && chunk.error) {
+              send({ type: "error", error: chunk.error });
+            }
+          }
+
+          // No tool calls → this was the final answer.
+          if (toolCalls.length === 0) break;
+
+          messages.push({
+            role: "assistant",
+            content: stepText,
+            tool_calls: toolCalls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: JSON.stringify(call.args) },
+            })),
+          });
+
+          for (const call of toolCalls) {
+            if (abortController.signal.aborted) break;
+            send({ type: "status", status: "running" });
+
+            const result = await executeTool(call.name, call.args, {
+              userId: ctx.userId,
+              conversationId: conversation!.id,
+              projectId: project!.id,
+              sandbox,
+              autoApprove: input.autoApprove === true,
+              onApprovalRequired: (approval) => {
+                send({
+                  type: "approval_required",
+                  approvalId: approval.id,
+                  toolCallId: approval.toolCallId,
+                  toolName: approval.toolName,
+                  arguments: approval.arguments,
+                  reason: approval.reason,
+                  expiresAt: approval.expiresAt,
+                });
+                send({ type: "status", status: "waiting" });
+              },
+            });
+
+            toolCallIds.push(result.toolCallId);
+            executedCalls.push({
+              id: result.toolCallId,
+              toolName: call.name,
+              ok: result.ok,
+              output: result.output.slice(0, 4000),
+            });
+
+            send({
+              type: "tool_result",
+              toolCallId: result.toolCallId,
+              toolCallRef: call.id,
+              toolName: call.name,
+              ok: result.ok,
+              output: result.output.slice(0, 8000),
+              error: result.error,
+              screenshot: result.screenshot,
+              screenshotFormat: result.screenshotFormat,
+              previewUrl: result.previewUrl,
+              sandboxId: result.sandboxId,
+              browserSessionId: result.browserSessionId,
+              durationMs: result.durationMs,
+              permissionLevel: result.permissionLevel,
+            });
+
+            if (result.previewUrl) {
+              send({ type: "preview", url: result.previewUrl, sandboxId: result.sandboxId });
+            }
+
+            messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              name: call.name,
+              content: result.output.slice(0, 20_000),
+            });
+          }
+
+          send({ type: "status", status: "thinking" });
+        }
+
+        // Attach every tool call from this turn to the assistant message so the
+        // UI and the API can render them together after a reload.
+        for (const id of toolCallIds) {
+          store.updateToolCall(id, { messageId: undefined, conversationId: conversation!.id });
+        }
+
+        const assistantMessage = store.createMessage({
+          conversationId: conversation!.id,
+          role: "assistant",
+          content: fullText,
+          modelId: demoMode ? "x-it-demo-agent" : model,
+          metadata: { toolCalls: executedCalls, demoMode },
+        });
+
+        for (const id of toolCallIds) {
+          store.updateToolCall(id, { messageId: assistantMessage.id });
+        }
+
+        send({ type: "message", messageId: assistantMessage.id, content: fullText });
+        send({ type: "status", status: "completed" });
+        finish();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Streaming failed";
+        console.error("[chat] stream error:", message);
+        send({ type: "error", error: message });
+        send({ type: "status", status: "failed" });
+        finish();
+      }
+    },
+    cancel() {
+      abortController.abort();
+      void getBrowserEngine().closeAll();
+    },
+  });
+
+  return new NextResponse(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

@@ -1,7 +1,6 @@
 "use client";
 
-import { type ToolCall } from "@/lib/stores/chat-store";
-import { useSandboxStore } from "@/lib/stores/sandbox-store";
+import { type UiToolCall } from "@/lib/stores/chat-store";
 import {
   ChevronDown,
   ChevronRight,
@@ -11,11 +10,16 @@ import {
   Loader2,
   Ban,
   Shield,
+  Image as ImageIcon,
+  ExternalLink,
 } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 
 interface ToolCallCardProps {
-  toolCall: ToolCall;
+  toolCall: UiToolCall;
+  onDecided?: (toolCallId: string, decision: "approved" | "rejected") => void;
 }
 
 const TOOL_ICONS: Record<string, string> = {
@@ -26,34 +30,47 @@ const TOOL_ICONS: Record<string, string> = {
   terminal_exec: "💻",
   code_run: "▶️",
   browser_navigate: "🌐",
+  browser_action: "🖱️",
   browser_screenshot: "📸",
+  browser_extract: "🧲",
+  browser_close: "🚪",
   package_install: "📦",
   server_start: "🚀",
   server_stop: "⏹️",
   search_web: "🔍",
-  screenshot_desktop: "🖥️",
+  snapshot_create: "🧷",
 };
 
-const STATUS_ICONS = {
-  pending: <Clock className="h-4 w-4 text-status-waiting" />,
-  running: <Loader2 className="h-4 w-4 animate-spin text-status-running" />,
-  completed: <CheckCircle2 className="h-4 w-4 text-status-completed" />,
-  failed: <XCircle className="h-4 w-4 text-status-failed" />,
-  cancelled: <Ban className="h-4 w-4 text-muted-foreground" />,
-  rejected: <Shield className="h-4 w-4 text-destructive" />,
-};
+export function ToolCallCard({ toolCall, onDecided }: ToolCallCardProps) {
+  const [isExpanded, setIsExpanded] = useState(toolCall.status !== "completed");
+  const [deciding, setDeciding] = useState(false);
 
-export function ToolCallCard({ toolCall }: ToolCallCardProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const { pendingApprovals } = useSandboxStore();
+  const needsApproval = toolCall.status === "waiting_approval" && Boolean(toolCall.approvalId);
 
-  const approval = pendingApprovals.find(
-    (a) => a.toolCallId === toolCall.id
-  );
-  const needsApproval = approval?.status === "pending";
+  const statusIcon = {
+    pending: <Clock className="h-4 w-4 text-status-waiting" />,
+    waiting_approval: <Shield className="h-4 w-4 text-status-waiting" />,
+    running: <Loader2 className="h-4 w-4 animate-spin text-status-running" />,
+    completed: <CheckCircle2 className="h-4 w-4 text-status-completed" />,
+    failed: <XCircle className="h-4 w-4 text-status-failed" />,
+    rejected: <Ban className="h-4 w-4 text-destructive" />,
+  }[toolCall.status];
 
-  const icon = TOOL_ICONS[toolCall.toolName] || "🔧";
-  const statusIcon = STATUS_ICONS[toolCall.status];
+  async function decide(decision: "approve" | "reject") {
+    if (!toolCall.approvalId) return;
+    setDeciding(true);
+    try {
+      const res = await fetch(`/api/approvals/${toolCall.approvalId}/${decision}`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Failed to ${decision}`);
+      toast.success(decision === "approve" ? "Approved" : "Rejected");
+      onDecided?.(toolCall.id, decision === "approve" ? "approved" : "rejected");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Decision failed");
+    } finally {
+      setDeciding(false);
+    }
+  }
 
   return (
     <div
@@ -61,29 +78,29 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
         needsApproval
           ? "border-status-waiting approval-glow"
           : toolCall.status === "failed"
-          ? "border-destructive/30"
-          : "border-border"
+            ? "border-destructive/30"
+            : "border-border"
       } bg-card`}
     >
-      {/* Header */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/50 transition-colors rounded-lg"
+        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent/50"
       >
         {isExpanded ? (
           <ChevronDown className="h-4 w-4 text-muted-foreground" />
         ) : (
           <ChevronRight className="h-4 w-4 text-muted-foreground" />
         )}
-        <span className="text-base">{icon}</span>
+        <span className="text-base">{TOOL_ICONS[toolCall.toolName] || "🔧"}</span>
         <span className="flex-1 font-medium">{toolCall.toolName}</span>
+        {toolCall.durationMs ? (
+          <span className="text-[10px] text-muted-foreground">{toolCall.durationMs}ms</span>
+        ) : null}
         {statusIcon}
       </button>
 
-      {/* Expanded content */}
       {isExpanded && (
-        <div className="border-t border-border px-3 py-3 space-y-3">
-          {/* Reason */}
+        <div className="space-y-3 border-t border-border px-3 py-3">
           {toolCall.reason && (
             <div>
               <span className="text-xs font-medium text-muted-foreground">Reason</span>
@@ -91,65 +108,68 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             </div>
           )}
 
-          {/* Arguments */}
-          {Object.keys(toolCall.arguments).length > 0 && (
+          {Object.keys(toolCall.arguments || {}).length > 0 && (
             <div>
               <span className="text-xs font-medium text-muted-foreground">Arguments</span>
-              <pre className="mt-1 overflow-x-auto rounded-md bg-muted/50 p-2 text-xs">
+              <pre className="mt-1 max-h-48 overflow-auto rounded-md bg-muted/50 p-2 text-xs">
                 {JSON.stringify(toolCall.arguments, null, 2)}
               </pre>
             </div>
           )}
 
-          {/* Result */}
-          {toolCall.result && (
+          {toolCall.output && (
             <div>
               <span className="text-xs font-medium text-muted-foreground">Result</span>
-              <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-muted/50 p-2 text-xs">
-                {toolCall.result}
+              <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-muted/50 p-2 text-xs">
+                {toolCall.output}
               </pre>
             </div>
           )}
 
-          {/* Error */}
           {toolCall.error && (
             <div>
               <span className="text-xs font-medium text-destructive">Error</span>
-              <pre className="mt-1 overflow-x-auto rounded-md bg-destructive/10 p-2 text-xs text-destructive">
+              <pre className="mt-1 overflow-auto whitespace-pre-wrap rounded-md bg-destructive/10 p-2 text-xs text-destructive">
                 {toolCall.error}
               </pre>
             </div>
           )}
 
-          {/* Timing */}
-          {toolCall.startedAt && (
-            <div className="flex items-center gap-4 text-xs text-muted-foreground">
-              <span>Started: {new Date(toolCall.startedAt).toLocaleTimeString()}</span>
-              {toolCall.completedAt && (
-                <span>
-                  Duration:{" "}
-                  {Math.round(
-                    (new Date(toolCall.completedAt).getTime() -
-                      new Date(toolCall.startedAt).getTime()) /
-                      1000
-                  )}
-                  s
-                </span>
-              )}
+          {toolCall.screenshot && (
+            <div>
+              <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <ImageIcon className="h-3 w-3" /> Screenshot
+              </span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={`data:image/${toolCall.screenshotFormat || "png"};base64,${toolCall.screenshot}`}
+                alt="Browser screenshot captured by the agent"
+                className="mt-1 w-full rounded-md border border-border"
+              />
             </div>
           )}
 
-          {/* Approval actions */}
+          {toolCall.previewUrl && (
+            <a
+              href={toolCall.previewUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1 text-xs text-primary hover:underline"
+            >
+              <ExternalLink className="h-3 w-3" /> Open live preview
+            </a>
+          )}
+
           {needsApproval && (
             <div className="flex items-center gap-2 rounded-md bg-status-waiting/10 p-3">
               <Shield className="h-4 w-4 text-status-waiting" />
-              <span className="flex-1 text-sm">This action requires your approval</span>
-              <button className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90">
+              <span className="flex-1 text-sm">This action needs your approval</span>
+              <Button size="sm" disabled={deciding} onClick={() => decide("approve")}>
                 Approve
-              </button>
-              <button className="rounded-md border border-input px-3 py-1.5 text-xs font-medium hover:bg-accent">
+              </Button>
+              <Button size="sm" variant="outline" disabled={deciding} onClick={() => decide("reject")}>
                 Reject
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -157,3 +177,5 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
     </div>
   );
 }
+
+export default ToolCallCard;

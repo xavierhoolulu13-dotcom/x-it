@@ -1,212 +1,768 @@
 /**
- * In-memory data store for development/demo.
- * This provides a working database layer when Prisma is not available.
- * In production, replace with Prisma client calls.
+ * X-IT persistent store.
+ *
+ * Ships with a durable JSON-file backend (`.x-it-data/x-it.json`) so the app is
+ * fully functional without PostgreSQL, and transparently exposes the same
+ * interface that the Prisma models in `prisma/schema.prisma` describe.
+ *
+ * Swap in the Prisma backend by setting DATABASE_URL and running
+ * `npx prisma db push` — `lib/db/prisma-store.ts` implements the same surface.
  */
 
-export interface User {
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { hashSync } from "bcryptjs";
+import { ensureDir, STATE_FILE } from "@/lib/runtime/paths";
+
+export type UserRole = "USER" | "ADMIN";
+export type ApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
+export type ToolStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED"
+  | "REJECTED";
+export type SandboxStatus = "creating" | "running" | "stopped" | "error" | "destroyed";
+
+export interface UserRecord {
   id: string;
   email: string;
   name: string;
-  role: "USER" | "ADMIN";
+  role: UserRole;
   hashedPassword?: string;
+  image?: string;
+  provider?: "credentials" | "github" | "google";
   settings: Record<string, unknown>;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface Project {
+export interface ProjectRecord {
   id: string;
   name: string;
   description: string;
   userId: string;
   systemPrompt: string;
   settings: Record<string, unknown>;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface Conversation {
+export interface ConversationRecord {
   id: string;
   title: string;
   projectId: string;
+  userId: string;
+  status: "ACTIVE" | "ARCHIVED";
   modelId: string;
   temperature: number;
   maxTokens: number;
   systemPrompt: string;
   metadata: Record<string, unknown>;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface Message {
+export interface MessageRecord {
   id: string;
   conversationId: string;
-  role: string;
+  userId?: string;
+  role: "user" | "assistant" | "system" | "tool";
   content: string;
+  modelId?: string;
+  tokenCount?: number;
   metadata: Record<string, unknown>;
-  createdAt: Date;
+  createdAt: string;
 }
 
-export interface ToolCall {
+export interface ToolCallRecord {
   id: string;
-  messageId: string;
+  conversationId?: string;
+  messageId?: string;
+  userId: string;
   toolName: string;
   arguments: Record<string, unknown>;
-  result: string | null;
-  error: string | null;
-  status: string;
-  startedAt: Date | null;
-  completedAt: Date | null;
-  duration: number | null;
-  createdAt: Date;
+  result?: string | null;
+  error?: string | null;
+  status: ToolStatus;
+  permissionLevel: string;
+  approvalId?: string | null;
+  sandboxId?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  duration?: number | null;
+  createdAt: string;
 }
 
-export interface Approval {
+export interface ApprovalRecord {
   id: string;
   toolCallId: string;
-  status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
   userId: string;
-  decidedAt: Date | null;
-  expiresAt: Date;
-  createdAt: Date;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  reason: string;
+  status: ApprovalStatus;
+  decidedAt?: string | null;
+  expiresAt: string;
+  createdAt: string;
 }
 
-export interface AuditLog {
+export interface AuditRecord {
   id: string;
   userId: string;
   action: string;
   resource: string;
-  resourceId: string;
+  resourceId?: string;
   details: Record<string, unknown>;
-  createdAt: Date;
+  ipAddress?: string;
+  userAgent?: string;
+  createdAt: string;
 }
 
-class InMemoryStore {
-  users: Map<string, User> = new Map();
-  projects: Map<string, Project> = new Map();
-  conversations: Map<string, Conversation> = new Map();
-  messages: Map<string, Message> = new Map();
-  toolCalls: Map<string, ToolCall> = new Map();
-  approvals: Map<string, Approval> = new Map();
-  auditLogs: AuditLog[] = [];
+export interface SnapshotRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  description: string;
+  files: { path: string; content: string }[];
+  createdAt: string;
+}
+
+export interface SandboxRecord {
+  id: string;
+  projectId: string;
+  userId: string;
+  backend: "docker" | "local";
+  containerId?: string | null;
+  status: SandboxStatus;
+  workspaceDir: string;
+  port?: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BrowserSessionRecord {
+  id: string;
+  userId: string;
+  name: string;
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DatabaseShape {
+  version: number;
+  users: UserRecord[];
+  projects: ProjectRecord[];
+  conversations: ConversationRecord[];
+  messages: MessageRecord[];
+  toolCalls: ToolCallRecord[];
+  approvals: ApprovalRecord[];
+  auditLogs: AuditRecord[];
+  snapshots: SnapshotRecord[];
+  sandboxes: SandboxRecord[];
+  browserSessions: BrowserSessionRecord[];
+}
+
+export function newId(prefix: string): string {
+  return `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+/**
+ * Demo credentials are seeded so a fresh install is usable immediately.
+ * Password: demo1234 (bcrypt hash generated by scripts/seed or first boot).
+ */
+export const DEMO_USER_ID = "user-demo";
+export const DEMO_PROJECT_ID = "project-default";
+
+function emptyDb(): DatabaseShape {
+  return {
+    version: 3,
+    users: [],
+    projects: [],
+    conversations: [],
+    messages: [],
+    toolCalls: [],
+    approvals: [],
+    auditLogs: [],
+    snapshots: [],
+    sandboxes: [],
+    browserSessions: [],
+  };
+}
+
+function load(): DatabaseShape {
+  try {
+    if (existsSync(STATE_FILE)) {
+      const raw = readFileSync(STATE_FILE, "utf8");
+      const parsed = JSON.parse(raw) as Partial<DatabaseShape>;
+      return { ...emptyDb(), ...parsed };
+    }
+  } catch (error) {
+    console.error("[store] failed to read state file, starting fresh:", error);
+  }
+  return emptyDb();
+}
+
+export class XitStore {
+  private db: DatabaseShape;
+  private saveTimer: NodeJS.Timeout | null = null;
+  private dirty = false;
 
   constructor() {
-    this.seed();
+    ensureDir(STATE_FILE.replace(/\/[^/]+$/, ""));
+    this.db = load();
+    this.ensureSeed();
   }
 
-  private seed() {
-    // Create demo user
-    const user: User = {
-      id: "user-demo",
-      email: "demo@xit.dev",
-      name: "Demo User",
-      role: "ADMIN",
-      settings: { theme: "dark", defaultModel: "gpt-4" },
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    this.users.set(user.id, user);
-
-    // Create default project
-    const project: Project = {
-      id: "project-default",
-      name: "Default Project",
-      description: "Your default workspace",
-      userId: user.id,
-      systemPrompt:
-        "You are a helpful AI computer assistant. You can create files, run code, execute commands, and browse the web — all inside an isolated sandbox environment.",
-      settings: {},
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    this.projects.set(project.id, project);
+  /** Raw snapshot of the database (used by tests and backup/export). */
+  snapshot(): DatabaseShape {
+    return JSON.parse(JSON.stringify(this.db)) as DatabaseShape;
   }
 
-  // User operations
-  getUserById(id: string) { return this.users.get(id); }
-  getUserByEmail(email: string) { return Array.from(this.users.values()).find(u => u.email === email); }
-  createUser(user: User) { this.users.set(user.id, user); return user; }
+  replaceAll(next: DatabaseShape): void {
+    this.db = next;
+    this.persist();
+  }
 
-  // Project operations
-  getProjectsByUser(userId: string) { return Array.from(this.projects.values()).filter(p => p.userId === userId); }
-  getProjectById(id: string) { return this.projects.get(id); }
-  createProject(project: Project) { this.projects.set(project.id, project); return project; }
-  updateProject(id: string, updates: Partial<Project>) {
-    const existing = this.projects.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...updates, updatedAt: new Date() };
-    this.projects.set(id, updated);
-    return updated;
-  }
-  deleteProject(id: string) { return this.projects.delete(id); }
-
-  // Conversation operations
-  getConversationsByProject(projectId: string) {
-    return Array.from(this.conversations.values())
-      .filter(c => c.projectId === projectId)
-      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
-  }
-  getConversationById(id: string) { return this.conversations.get(id); }
-  createConversation(conv: Conversation) { this.conversations.set(conv.id, conv); return conv; }
-  updateConversation(id: string, updates: Partial<Conversation>) {
-    const existing = this.conversations.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...updates, updatedAt: new Date() };
-    this.conversations.set(id, updated);
-    return updated;
-  }
-  deleteConversation(id: string) {
-    // Also delete messages
-    for (const [msgId, msg] of Array.from(this.messages.entries())) {
-      if (msg.conversationId === id) this.messages.delete(msgId);
+  private ensureSeed(): void {
+    if (!this.db.users.some((u) => u.id === DEMO_USER_ID)) {
+      const ts = nowIso();
+      this.db.users.push({
+        id: DEMO_USER_ID,
+        email: process.env.DEMO_EMAIL || "demo@xit.dev",
+        name: "Demo User",
+        role: "ADMIN",
+        // bcrypt hash of "demo1234" — replaced on first login-less install by seed script
+        hashedPassword:
+          process.env.DEMO_PASSWORD_HASH ||
+          hashSync(process.env.DEMO_PASSWORD || "demo1234", 10),
+        provider: "credentials",
+        settings: { theme: "dark", defaultModel: process.env.DEFAULT_MODEL || "gpt-4o-mini" },
+        createdAt: ts,
+        updatedAt: ts,
+      });
+      this.dirty = true;
     }
-    return this.conversations.delete(id);
+    if (!this.db.projects.some((p) => p.id === DEMO_PROJECT_ID)) {
+      const ts = nowIso();
+      this.db.projects.push({
+        id: DEMO_PROJECT_ID,
+        name: "Default Project",
+        description: "Your default workspace",
+        userId: DEMO_USER_ID,
+        systemPrompt:
+          "You are X-IT, a personal AI computer assistant. You can write files, run commands, run code, and drive a real browser — all inside an isolated sandbox. Prefer doing the work over describing it. Explain results briefly, and ask for approval when an action is destructive.",
+        settings: {},
+        createdAt: ts,
+        updatedAt: ts,
+      });
+      this.dirty = true;
+    }
+    if (this.dirty) this.persist();
   }
 
-  // Message operations
-  getMessagesByConversation(conversationId: string) {
-    return Array.from(this.messages.values())
-      .filter(m => m.conversationId === conversationId)
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-  }
-  createMessage(message: Message) { this.messages.set(message.id, message); return message; }
-
-  // Tool call operations
-  getToolCallsByMessage(messageId: string) {
-    return Array.from(this.toolCalls.values()).filter(tc => tc.messageId === messageId);
-  }
-  createToolCall(toolCall: ToolCall) { this.toolCalls.set(toolCall.id, toolCall); return toolCall; }
-  updateToolCall(id: string, updates: Partial<ToolCall>) {
-    const existing = this.toolCalls.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...updates };
-    this.toolCalls.set(id, updated);
-    return updated;
+  private scheduleSave(): void {
+    this.dirty = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.persist();
+    }, 150);
+    if (typeof this.saveTimer.unref === "function") this.saveTimer.unref();
   }
 
-  // Approval operations
-  getPendingApprovals(userId: string) {
-    return Array.from(this.approvals.values()).filter(a => a.userId === userId && a.status === "PENDING");
-  }
-  getApprovalById(id: string) { return this.approvals.get(id); }
-  createApproval(approval: Approval) { this.approvals.set(approval.id, approval); return approval; }
-  updateApproval(id: string, updates: Partial<Approval>) {
-    const existing = this.approvals.get(id);
-    if (!existing) return null;
-    const updated = { ...existing, ...updates };
-    this.approvals.set(id, updated);
-    return updated;
+  /** Flush pending writes synchronously (atomic replace). */
+  persist(): void {
+    if (!this.dirty) return;
+    try {
+      ensureDir(STATE_FILE.replace(/\/[^/]+$/, ""));
+      const tmp = `${STATE_FILE}.tmp`;
+      writeFileSync(tmp, JSON.stringify(this.db, null, 2), "utf8");
+      renameSync(tmp, STATE_FILE);
+      this.dirty = false;
+    } catch (error) {
+      console.error("[store] failed to persist state:", error);
+    }
   }
 
-  // Audit log operations
-  addAuditLog(log: AuditLog) { this.auditLogs.unshift(log); return log; }
-  getAuditLogs(userId: string, limit = 50) {
-    return this.auditLogs.filter(l => l.userId === userId).slice(0, limit);
+  // ---------------------------------------------------------------- users
+  createUser(input: {
+    email: string;
+    name: string;
+    hashedPassword?: string;
+    role?: UserRole;
+    image?: string;
+    provider?: UserRecord["provider"];
+    settings?: Record<string, unknown>;
+    id?: string;
+  }): UserRecord {
+    const ts = nowIso();
+    const user: UserRecord = {
+      id: input.id || newId("user"),
+      email: input.email.trim().toLowerCase(),
+      name: input.name,
+      role: input.role || "USER",
+      hashedPassword: input.hashedPassword,
+      image: input.image,
+      provider: input.provider || "credentials",
+      settings: input.settings || {},
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    this.db.users.push(user);
+    this.scheduleSave();
+    return user;
+  }
+
+  getUserById(id: string): UserRecord | undefined {
+    return this.db.users.find((u) => u.id === id);
+  }
+
+  getUserByEmail(email: string): UserRecord | undefined {
+    const target = email.trim().toLowerCase();
+    return this.db.users.find((u) => u.email === target);
+  }
+
+  updateUser(id: string, updates: Partial<UserRecord>): UserRecord | undefined {
+    const user = this.getUserById(id);
+    if (!user) return undefined;
+    Object.assign(user, updates, { updatedAt: nowIso() });
+    this.scheduleSave();
+    return user;
+  }
+
+  countUsers(): number {
+    return this.db.users.length;
+  }
+
+  // ------------------------------------------------------------- projects
+  createProject(input: {
+    name: string;
+    description?: string;
+    userId: string;
+    systemPrompt?: string;
+    settings?: Record<string, unknown>;
+  }): ProjectRecord {
+    const ts = nowIso();
+    const project: ProjectRecord = {
+      id: newId("project"),
+      name: input.name,
+      description: input.description || "",
+      userId: input.userId,
+      systemPrompt: input.systemPrompt || "",
+      settings: input.settings || {},
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    this.db.projects.push(project);
+    this.scheduleSave();
+    return project;
+  }
+
+  listProjects(userId: string): ProjectRecord[] {
+    return this.db.projects
+      .filter((p) => p.userId === userId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getProject(id: string): ProjectRecord | undefined {
+    return this.db.projects.find((p) => p.id === id);
+  }
+
+  updateProject(id: string, updates: Partial<ProjectRecord>): ProjectRecord | undefined {
+    const project = this.getProject(id);
+    if (!project) return undefined;
+    Object.assign(project, updates, { updatedAt: nowIso() });
+    this.scheduleSave();
+    return project;
+  }
+
+  deleteProject(id: string): boolean {
+    const before = this.db.projects.length;
+    this.db.projects = this.db.projects.filter((p) => p.id !== id);
+    const convIds = this.db.conversations.filter((c) => c.projectId === id).map((c) => c.id);
+    this.db.conversations = this.db.conversations.filter((c) => c.projectId !== id);
+    this.db.messages = this.db.messages.filter((m) => !convIds.includes(m.conversationId));
+    this.db.browserSessions = this.db.browserSessions.slice();
+    this.scheduleSave();
+    return this.db.projects.length < before;
+  }
+
+  // -------------------------------------------------------- conversations
+  createConversation(input: {
+    title: string;
+    projectId: string;
+    userId: string;
+    modelId?: string;
+    temperature?: number;
+    maxTokens?: number;
+    systemPrompt?: string;
+  }): ConversationRecord {
+    const ts = nowIso();
+    const conversation: ConversationRecord = {
+      id: newId("conv"),
+      title: input.title,
+      projectId: input.projectId,
+      userId: input.userId,
+      status: "ACTIVE",
+      modelId: input.modelId || process.env.DEFAULT_MODEL || "gpt-4o-mini",
+      temperature: input.temperature ?? 0.7,
+      maxTokens: input.maxTokens ?? 4096,
+      systemPrompt: input.systemPrompt || "",
+      metadata: {},
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    this.db.conversations.push(conversation);
+    this.scheduleSave();
+    return conversation;
+  }
+
+  listConversations(projectId: string, opts?: { search?: string }): ConversationRecord[] {
+    const search = opts?.search?.toLowerCase();
+    return this.db.conversations
+      .filter((c) => c.projectId === projectId)
+      .filter((c) => (search ? c.title.toLowerCase().includes(search) : true))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  listConversationsByUser(userId: string): ConversationRecord[] {
+    return this.db.conversations
+      .filter((c) => c.userId === userId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getConversation(id: string): ConversationRecord | undefined {
+    return this.db.conversations.find((c) => c.id === id);
+  }
+
+  updateConversation(
+    id: string,
+    updates: Partial<ConversationRecord>
+  ): ConversationRecord | undefined {
+    const conversation = this.getConversation(id);
+    if (!conversation) return undefined;
+    Object.assign(conversation, updates, { updatedAt: nowIso() });
+    this.scheduleSave();
+    return conversation;
+  }
+
+  deleteConversation(id: string): boolean {
+    const before = this.db.conversations.length;
+    this.db.conversations = this.db.conversations.filter((c) => c.id !== id);
+    this.db.messages = this.db.messages.filter((m) => m.conversationId !== id);
+    this.scheduleSave();
+    return this.db.conversations.length < before;
+  }
+
+  // ------------------------------------------------------------- messages
+  createMessage(input: {
+    conversationId: string;
+    role: MessageRecord["role"];
+    content: string;
+    userId?: string;
+    modelId?: string;
+    metadata?: Record<string, unknown>;
+  }): MessageRecord {
+    const message: MessageRecord = {
+      id: newId("msg"),
+      conversationId: input.conversationId,
+      userId: input.userId,
+      role: input.role,
+      content: input.content,
+      modelId: input.modelId,
+      metadata: input.metadata || {},
+      createdAt: nowIso(),
+    };
+    this.db.messages.push(message);
+    const conversation = this.getConversation(input.conversationId);
+    if (conversation) conversation.updatedAt = message.createdAt;
+    this.scheduleSave();
+    return message;
+  }
+
+  listMessages(conversationId: string): MessageRecord[] {
+    return this.db.messages
+      .filter((m) => m.conversationId === conversationId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  updateMessage(id: string, updates: Partial<MessageRecord>): MessageRecord | undefined {
+    const message = this.db.messages.find((m) => m.id === id);
+    if (!message) return undefined;
+    Object.assign(message, updates);
+    this.scheduleSave();
+    return message;
+  }
+
+  // ----------------------------------------------------------- tool calls
+  createToolCall(input: {
+    userId: string;
+    conversationId?: string;
+    messageId?: string;
+    toolName: string;
+    arguments: Record<string, unknown>;
+    permissionLevel: string;
+    sandboxId?: string | null;
+    status?: ToolStatus;
+  }): ToolCallRecord {
+    const toolCall: ToolCallRecord = {
+      id: newId("tool"),
+      userId: input.userId,
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      toolName: input.toolName,
+      arguments: input.arguments,
+      permissionLevel: input.permissionLevel,
+      sandboxId: input.sandboxId ?? null,
+      status: input.status || "PENDING",
+      createdAt: nowIso(),
+    };
+    this.db.toolCalls.push(toolCall);
+    this.scheduleSave();
+    return toolCall;
+  }
+
+  updateToolCall(id: string, updates: Partial<ToolCallRecord>): ToolCallRecord | undefined {
+    const toolCall = this.db.toolCalls.find((t) => t.id === id);
+    if (!toolCall) return undefined;
+    Object.assign(toolCall, updates);
+    this.scheduleSave();
+    return toolCall;
+  }
+
+  listToolCalls(opts?: { userId?: string; conversationId?: string; limit?: number }): ToolCallRecord[] {
+    return this.db.toolCalls
+      .filter((t) => (opts?.userId ? t.userId === opts.userId : true))
+      .filter((t) => (opts?.conversationId ? t.conversationId === opts.conversationId : true))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, opts?.limit ?? 100);
+  }
+
+  // ------------------------------------------------------------ approvals
+  createApproval(input: {
+    toolCallId: string;
+    userId: string;
+    toolName: string;
+    arguments: Record<string, unknown>;
+    reason: string;
+    ttlSeconds?: number;
+  }): ApprovalRecord {
+    const approval: ApprovalRecord = {
+      id: newId("approval"),
+      toolCallId: input.toolCallId,
+      userId: input.userId,
+      toolName: input.toolName,
+      arguments: input.arguments,
+      reason: input.reason,
+      status: "PENDING",
+      expiresAt: new Date(Date.now() + (input.ttlSeconds ?? 300) * 1000).toISOString(),
+      createdAt: nowIso(),
+    };
+    this.db.approvals.push(approval);
+    this.scheduleSave();
+    return approval;
+  }
+
+  getApproval(id: string): ApprovalRecord | undefined {
+    return this.db.approvals.find((a) => a.id === id);
+  }
+
+  getApprovalByToolCall(toolCallId: string): ApprovalRecord | undefined {
+    return this.db.approvals.find((a) => a.toolCallId === toolCallId);
+  }
+
+  listApprovals(opts?: { userId?: string; status?: ApprovalStatus; limit?: number }): ApprovalRecord[] {
+    return this.db.approvals
+      .filter((a) => (opts?.userId ? a.userId === opts.userId : true))
+      .filter((a) => (opts?.status ? a.status === opts.status : true))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, opts?.limit ?? 50);
+  }
+
+  updateApproval(id: string, updates: Partial<ApprovalRecord>): ApprovalRecord | undefined {
+    const approval = this.getApproval(id);
+    if (!approval) return undefined;
+    Object.assign(approval, updates);
+    this.scheduleSave();
+    return approval;
+  }
+
+  expireStaleApprovals(): number {
+    let expired = 0;
+    const now = Date.now();
+    for (const approval of this.db.approvals) {
+      if (approval.status === "PENDING" && Date.parse(approval.expiresAt) < now) {
+        approval.status = "EXPIRED";
+        approval.decidedAt = nowIso();
+        expired++;
+      }
+    }
+    if (expired) this.scheduleSave();
+    return expired;
+  }
+
+  // --------------------------------------------------------------- audit
+  addAuditLog(input: {
+    userId: string;
+    action: string;
+    resource: string;
+    resourceId?: string;
+    details?: Record<string, unknown>;
+    ipAddress?: string;
+    userAgent?: string;
+  }): AuditRecord {
+    const log: AuditRecord = {
+      id: newId("audit"),
+      userId: input.userId,
+      action: input.action,
+      resource: input.resource,
+      resourceId: input.resourceId,
+      details: input.details || {},
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+      createdAt: nowIso(),
+    };
+    this.db.auditLogs.unshift(log);
+    if (this.db.auditLogs.length > 5000) this.db.auditLogs.length = 5000;
+    this.scheduleSave();
+    return log;
+  }
+
+  listAuditLogs(opts?: { userId?: string; limit?: number; action?: string }): AuditRecord[] {
+    return this.db.auditLogs
+      .filter((l) => (opts?.userId ? l.userId === opts.userId : true))
+      .filter((l) => (opts?.action ? l.action === opts.action : true))
+      .slice(0, opts?.limit ?? 100);
+  }
+
+  // ----------------------------------------------------------- snapshots
+  createSnapshot(input: {
+    projectId: string;
+    name: string;
+    description?: string;
+    files: { path: string; content: string }[];
+  }): SnapshotRecord {
+    const snapshot: SnapshotRecord = {
+      id: newId("snap"),
+      projectId: input.projectId,
+      name: input.name,
+      description: input.description || "",
+      files: input.files,
+      createdAt: nowIso(),
+    };
+    this.db.snapshots.push(snapshot);
+    this.scheduleSave();
+    return snapshot;
+  }
+
+  listSnapshots(projectId: string): SnapshotRecord[] {
+    return this.db.snapshots
+      .filter((s) => s.projectId === projectId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  getSnapshot(id: string): SnapshotRecord | undefined {
+    return this.db.snapshots.find((s) => s.id === id);
+  }
+
+  // ------------------------------------------------------------ sandboxes
+  createSandboxRecord(input: {
+    id: string;
+    projectId: string;
+    userId: string;
+    backend: "docker" | "local";
+    workspaceDir: string;
+    containerId?: string | null;
+    port?: number | null;
+    status?: SandboxStatus;
+  }): SandboxRecord {
+    const ts = nowIso();
+    const record: SandboxRecord = {
+      id: input.id,
+      projectId: input.projectId,
+      userId: input.userId,
+      backend: input.backend,
+      containerId: input.containerId ?? null,
+      workspaceDir: input.workspaceDir,
+      port: input.port ?? null,
+      status: input.status || "running",
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    this.db.sandboxes.push(record);
+    this.scheduleSave();
+    return record;
+  }
+
+  getSandboxRecord(id: string): SandboxRecord | undefined {
+    return this.db.sandboxes.find((s) => s.id === id);
+  }
+
+  listSandboxRecords(userId?: string): SandboxRecord[] {
+    return this.db.sandboxes
+      .filter((s) => (userId ? s.userId === userId : true))
+      .filter((s) => s.status !== "destroyed")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  updateSandboxRecord(id: string, updates: Partial<SandboxRecord>): SandboxRecord | undefined {
+    const record = this.getSandboxRecord(id);
+    if (!record) return undefined;
+    Object.assign(record, updates, { updatedAt: nowIso() });
+    this.scheduleSave();
+    return record;
+  }
+
+  // ------------------------------------------------------ browser session
+  createBrowserSession(input: {
+    id: string;
+    userId: string;
+    name: string;
+    url: string;
+  }): BrowserSessionRecord {
+    const ts = nowIso();
+    const record: BrowserSessionRecord = { ...input, createdAt: ts, updatedAt: ts };
+    this.db.browserSessions.push(record);
+    this.scheduleSave();
+    return record;
+  }
+
+  getBrowserSession(id: string): BrowserSessionRecord | undefined {
+    return this.db.browserSessions.find((s) => s.id === id);
+  }
+
+  listBrowserSessions(userId: string): BrowserSessionRecord[] {
+    return this.db.browserSessions
+      .filter((s) => s.userId === userId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  updateBrowserSession(id: string, updates: Partial<BrowserSessionRecord>): BrowserSessionRecord | undefined {
+    const record = this.getBrowserSession(id);
+    if (!record) return undefined;
+    Object.assign(record, updates, { updatedAt: nowIso() });
+    this.scheduleSave();
+    return record;
+  }
+
+  deleteBrowserSession(id: string): boolean {
+    const before = this.db.browserSessions.length;
+    this.db.browserSessions = this.db.browserSessions.filter((s) => s.id !== id);
+    this.scheduleSave();
+    return this.db.browserSessions.length < before;
   }
 }
 
-// Singleton
-const globalForStore = globalThis as unknown as { __xitStore: InMemoryStore | undefined };
-export const store = globalForStore.__xitStore ?? new InMemoryStore();
-if (process.env.NODE_ENV !== "production") globalForStore.__xitStore = store;
+const globalForStore = globalThis as unknown as { __xitStore?: XitStore };
+
+export const store: XitStore = globalForStore.__xitStore ?? new XitStore();
+globalForStore.__xitStore = store;
+
+export default store;

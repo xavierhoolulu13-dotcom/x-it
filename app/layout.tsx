@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
   title: "X-IT — Personal AI Computer Assistant",
@@ -15,9 +16,9 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className="font-sans antialiased">
-        <div className="flex h-screen w-screen overflow-hidden">
-          {children}
-        </div>
+        <Providers>
+          <div className="flex h-screen w-screen overflow-hidden">{children}</div>
+        </Providers>
       </body>
     </html>
   );

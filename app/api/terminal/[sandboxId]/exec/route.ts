@@ -1,84 +1,79 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
+import { z } from "zod";
+import { getSandboxManager } from "@/lib/sandbox/manager";
+import { store } from "@/lib/db/store";
+import { PolicyViolationError } from "@/lib/tools/errors";
+import { ok, fail, readJson, withAuth } from "@/lib/util/api";
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { sandboxId: string } }
-) {
-  try {
-    const { sandboxId } = params;
-    const body = await req.json();
-    const { command, timeout } = body;
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
-    if (!command) {
-      return NextResponse.json(
-        { error: "command is required" },
-        { status: 400 }
-      );
-    }
+const schema = z.object({
+  command: z.string().min(1).max(10_000),
+  timeout: z.number().min(1).max(300).optional(),
+  cwd: z.string().optional(),
+});
 
-    // Security: Block dangerous commands
-    const blocked = [
-      /\brm\s+-rf\s+\/\b/,           // rm -rf /
-      /\bmkfs\b/,                     // format filesystem
-      /\bdd\b.*\/dev/,               // dd to devices
-      /\b:(){ :\|:& };:/,           // fork bomb
-      /\bcurl\b.*\|\s*bash/,        // curl pipe to shell
-      /\bwget\b.*\|\s*bash/,        // wget pipe to shell
-      /\bsudo\s+rm\b/,              // sudo rm
-    ];
+export async function POST(req: NextRequest, { params }: { params: { sandboxId: string } }) {
+  return withAuth(req, async (ctx) => {
+    const manager = getSandboxManager();
+    const runtime = await manager.get(params.sandboxId);
+    if (!runtime) return fail("Sandbox not found", 404);
+    if (runtime.record.userId !== ctx.userId && ctx.user.role !== "ADMIN") return fail("Forbidden", 403);
 
-    for (const pattern of blocked) {
-      if (pattern.test(command)) {
-        return NextResponse.json(
-          {
-            stdout: "",
-            stderr: "BLOCKED: This command is not allowed for security reasons.",
-            exitCode: 1,
-          },
-          { status: 403 }
-        );
+    const parsed = schema.safeParse(await readJson<unknown>(req));
+    if (!parsed.success) return fail("command is required", 400);
+
+    try {
+      const result = await manager.exec(runtime, parsed.data.command, {
+        timeoutSeconds: parsed.data.timeout ?? 30,
+        workingDir: parsed.data.cwd,
+      });
+
+      if (result.blocked) {
+        store.addAuditLog({
+          userId: ctx.userId,
+          action: "terminal.blocked",
+          resource: "sandbox",
+          resourceId: runtime.id,
+          details: { command: parsed.data.command.slice(0, 300), rule: result.blocked.rule },
+        });
+        return fail(result.stderr || "Command blocked by policy", 403, {
+          rule: result.blocked.rule,
+          policy: true,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+        });
       }
+
+      store.addAuditLog({
+        userId: ctx.userId,
+        action: "terminal.exec",
+        resource: "sandbox",
+        resourceId: runtime.id,
+        details: {
+          command: parsed.data.command.slice(0, 500),
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+        },
+      });
+
+      return ok({
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        truncated: result.truncated,
+        durationMs: result.durationMs,
+        sandboxId: runtime.id,
+        cwd: runtime.workspaceDir,
+      });
+    } catch (error) {
+      if (error instanceof PolicyViolationError) {
+        return fail(error.message, 403, { rule: error.rule, policy: true });
+      }
+      return fail(error instanceof Error ? error.message : "Command failed", 400);
     }
-
-    // In production, this would execute in the sandbox container
-    // For now, return a simulated response
-    const simulatedOutput = simulateCommand(command);
-
-    return NextResponse.json({
-      stdout: simulatedOutput.stdout,
-      stderr: simulatedOutput.stderr,
-      exitCode: simulatedOutput.exitCode,
-      sandboxId,
-    });
-  } catch (error) {
-    console.error("Terminal exec error:", error);
-    return NextResponse.json(
-      { error: "Failed to execute command" },
-      { status: 500 }
-    );
-  }
-}
-
-function simulateCommand(command: string): {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-} {
-  const cmd = command.trim();
-
-  if (cmd === "pwd") return { stdout: "/home/sandbox/project", stderr: "", exitCode: 0 };
-  if (cmd === "whoami") return { stdout: "sandbox", stderr: "", exitCode: 0 };
-  if (cmd.startsWith("echo ")) return { stdout: cmd.slice(5).replace(/^["']|["']$/g, ""), stderr: "", exitCode: 0 };
-  if (cmd === "ls" || cmd.startsWith("ls ")) return { stdout: "README.md\nsrc/\npackage.json", stderr: "", exitCode: 0 };
-  if (cmd === "date") return { stdout: new Date().toString(), stderr: "", exitCode: 0 };
-  if (cmd === "node --version") return { stdout: "v20.11.0", stderr: "", exitCode: 0 };
-  if (cmd === "python3 --version") return { stdout: "Python 3.11.0", stderr: "", exitCode: 0 };
-  if (cmd === "uname -a") return { stdout: "Linux sandbox 5.15.0 #1 SMP x86_64 GNU/Linux", stderr: "", exitCode: 0 };
-  if (cmd.startsWith("cat ")) return { stdout: `[Contents of ${cmd.slice(4)}]\n// File contents would appear here`, stderr: "", exitCode: 0 };
-
-  return {
-    stdout: "",
-    stderr: `Command simulated: '${cmd}' would run in the sandbox container.`,
-    exitCode: 0,
-  };
+  });
 }

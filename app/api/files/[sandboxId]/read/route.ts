@@ -1,36 +1,24 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
+import { getSandboxManager } from "@/lib/sandbox/manager";
+import { ok, fail, withAuth } from "@/lib/util/api";
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: { sandboxId: string } }
-) {
-  try {
-    const { sandboxId } = params;
-    const { searchParams } = new URL(req.url);
-    const path = searchParams.get("path");
+export const dynamic = "force-dynamic";
 
-    if (!path) {
-      return NextResponse.json({ error: "path is required" }, { status: 400 });
+export async function GET(req: NextRequest, { params }: { params: { sandboxId: string } }) {
+  return withAuth(req, async (ctx) => {
+    const manager = getSandboxManager();
+    const runtime = await manager.get(params.sandboxId);
+    if (!runtime) return fail("Sandbox not found", 404);
+    if (runtime.record.userId !== ctx.userId && ctx.user.role !== "ADMIN") return fail("Forbidden", 403);
+
+    const path = new URL(req.url).searchParams.get("path");
+    if (!path) return fail("path is required", 400);
+
+    try {
+      const content = await manager.readFile(runtime, path);
+      return ok({ content, path, sandboxId: runtime.id, bytes: content.length });
+    } catch (error) {
+      return fail(error instanceof Error ? error.message : "Unable to read file", 400);
     }
-
-    // Mock file content based on path
-    const mockContent = `// Contents of ${path}
-// This would be read from the sandbox container in production.
-
-export default function App() {
-  return (
-    <div>
-      <h1>Hello from ${sandboxId}</h1>
-    </div>
-  );
-}`;
-
-    return NextResponse.json({ content: mockContent, path, sandboxId });
-  } catch (error) {
-    console.error("File read error:", error);
-    return NextResponse.json(
-      { error: "Failed to read file" },
-      { status: 500 }
-    );
-  }
+  });
 }
