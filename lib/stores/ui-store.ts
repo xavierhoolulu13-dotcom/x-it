@@ -13,6 +13,7 @@ interface UIState {
   emergencyStop: boolean;
   commandPaletteOpen: boolean;
   activeProjectId: string | null;
+  quickActionPrompt: string | null;
 
   // Actions
   setTheme: (theme: Theme) => void;
@@ -25,6 +26,8 @@ interface UIState {
   resetEmergencyStop: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setActiveProjectId: (id: string | null) => void;
+  fireQuickAction: (prompt: string) => void;
+  consumeQuickAction: () => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -37,6 +40,7 @@ export const useUIStore = create<UIState>((set) => ({
   emergencyStop: false,
   commandPaletteOpen: false,
   activeProjectId: null,
+  quickActionPrompt: null,
 
   setTheme: (theme) => set({ theme }),
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
@@ -48,4 +52,6 @@ export const useUIStore = create<UIState>((set) => ({
   resetEmergencyStop: () => set({ emergencyStop: false }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   setActiveProjectId: (id) => set({ activeProjectId: id }),
+  fireQuickAction: (prompt) => set({ quickActionPrompt: prompt }),
+  consumeQuickAction: () => set({ quickActionPrompt: null }),
 }));
