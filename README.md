@@ -17,6 +17,15 @@ tests against a production build. See [CHANGELOG.md](CHANGELOG.md) for details.
 ![E2E](https://img.shields.io/badge/production%20E2E-18%2F18-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+## 🧠 Ecosystem
+
+x-it is the brain of this ecosystem — four connected projects that run as one system:
+
+- **x-it** — https://github.com/xavierhoolulu13-dotcom/x-it — Xavier's own AI product and the brain/OS of the system (chat, sandbox execution, tool calling, local Ollama support).
+- **TENTCITY** — https://github.com/xavierhoolulu13-dotcom/tentcity (live: https://xavierhoolulu13-dotcom.github.io/tentcity/) — the public mall front door: $5 entry, tool directory, lead funnels.
+- **IMGCODE** — https://github.com/xavierhoolulu13-dotcom/imgcode — "code you tap, not type": visual tap-to-build system that compiles tapped specs into shippable systems.
+- **Hoolulu Factory** — https://github.com/xavierhoolulu13-dotcom/hoolulu-factory — the backend engine: agents, autopilot loops, client ops.
+
 ## ✨ Features
 
 ### 💬 Chat Interface
