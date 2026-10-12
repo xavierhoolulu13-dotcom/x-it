@@ -7,6 +7,7 @@ import { toProviderTools } from "@/lib/tools/tool-definitions";
 import { executeTool } from "@/lib/tools/executor";
 import { getSandboxManager, type SandboxRuntime } from "@/lib/sandbox/manager";
 import { getBrowserEngine } from "@/lib/browser/engine";
+import { HOOLULU_BRAIN } from "@/lib/ai/hoolulu-brain";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -24,22 +25,7 @@ const bodySchema = z.object({
   maxSteps: z.number().int().min(1).max(12).optional(),
 });
 
-const DEFAULT_SYSTEM_PROMPT = `You are X-IT, a personal AI computer assistant running inside a web workspace.
-
-You have real tools:
-- file_read / file_write / file_delete / file_list — operate on the sandbox workspace
-- terminal_exec — run shell commands in the sandbox
-- code_run — run python / javascript / typescript / bash / ruby snippets
-- browser_navigate / browser_action / browser_screenshot / browser_extract — drive a real headless Chromium browser
-- search_web — search from that browser
-- server_start / server_stop — run long-lived processes and get a preview URL
-- snapshot_create — checkpoint the workspace
-
-Rules:
-1. Do the work with tools instead of describing it. Never claim a file was written or a page was opened unless a tool call confirms it.
-2. Sensitive actions (writing files, running commands, driving the browser) require user approval — that is handled for you; just call the tool.
-3. Read tool output before responding. Report real results, including errors, plainly and briefly.
-4. Prefer relative paths inside the workspace (e.g. ./index.html).`;
+const DEFAULT_SYSTEM_PROMPT = HOOLULU_BRAIN;
 
 export async function POST(req: NextRequest) {
   let ctx;
