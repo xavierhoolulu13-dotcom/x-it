@@ -18,7 +18,32 @@ import {
   FolderOpen,
   X,
   RefreshCw,
+  Terminal,
+  LayoutTemplate,
+  Lightbulb,
+  Zap,
 } from "lucide-react";
+
+const QUICK_ACTIONS = [
+  {
+    icon: Terminal,
+    label: "Build & Run Python Algo",
+    prompt:
+      "Write a Python script that calculates fibonacci numbers, run it in the sandbox, and show me the output.",
+  },
+  {
+    icon: LayoutTemplate,
+    label: "Generate Web App Page",
+    prompt:
+      "Create a single-page web app with an HTML file, a CSS stylesheet, and JavaScript. Make it a beautiful landing page, run it, and show me the preview.",
+  },
+  {
+    icon: Lightbulb,
+    label: "Explain Algorithm",
+    prompt:
+      "Explain how a binary search algorithm works, then implement it in Python with test cases and run them in the sandbox.",
+  },
+];
 
 interface SidebarProps {
   isOpen: boolean;
@@ -40,7 +65,7 @@ export function Sidebar({ isOpen, onToggle, projects = [], activeProjectId }: Si
     setSearchQuery,
     reset,
   } = useChatStore();
-  const { setActiveProjectId } = useUIStore();
+  const { setActiveProjectId, fireQuickAction } = useUIStore();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [loading, setLoading] = useState(false);
@@ -164,6 +189,30 @@ export function Sidebar({ isOpen, onToggle, projects = [], activeProjectId }: Si
           <MessageSquarePlus className="h-4 w-4" />
           New conversation
         </Button>
+      </div>
+
+      <div className="px-3 pb-3">
+        <div className="mb-2 flex items-center gap-1.5 px-1">
+          <Zap className="h-3 w-3 text-primary" />
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+            Quick agent action
+          </span>
+        </div>
+        <div className="space-y-1.5">
+          {QUICK_ACTIONS.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={() => fireQuickAction(action.prompt)}
+              className="ss-glow-card flex w-full items-center gap-2.5 px-3 py-2 text-left"
+            >
+              <action.icon className="h-4 w-4 shrink-0 text-primary" />
+              <span className="truncate text-xs font-medium text-foreground">
+                {action.label}
+              </span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="px-3 pb-2">
