@@ -21,7 +21,7 @@ export function ChatInterface() {
     conversations,
     activeModel,
   } = useChatStore();
-  const { setStatus, emergencyStop, activeProjectId } = useUIStore();
+  const { setStatus, emergencyStop, activeProjectId, quickActionPrompt, consumeQuickAction } = useUIStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -313,6 +313,18 @@ export function ChatInterface() {
       setIsStreaming(false);
     }
   };
+
+  // Quick Agent Actions fired from the sidebar (ported from X-IT Studio).
+  // Placed after handleSend is defined to avoid TDZ issues.
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
+  useEffect(() => {
+    if (quickActionPrompt) {
+      consumeQuickAction();
+      void handleSendRef.current(quickActionPrompt);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickActionPrompt]);
 
   if (messages.length === 0) {
     return <WelcomeScreen onSend={handleSend} />;
