@@ -13,6 +13,11 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { hashSync } from "bcryptjs";
 import { ensureDir, STATE_FILE } from "@/lib/runtime/paths";
+import { HOOLULU_BRAIN } from "@/lib/ai/hoolulu-brain";
+
+/** The pre-Brain default project prompt (v3 and earlier). Used by the v4 migration. */
+const LEGACY_DEFAULT_PROJECT_PROMPT =
+  "You are X-IT, a personal AI computer assistant. You can write files, run commands, run code, and drive a real browser — all inside an isolated sandbox. Prefer doing the work over describing it. Explain results briefly, and ask for approval when an action is destructive.";
 
 export type UserRole = "USER" | "ADMIN";
 export type ApprovalStatus = "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
@@ -182,7 +187,7 @@ export const DEMO_PROJECT_ID = "project-default";
 
 function emptyDb(): DatabaseShape {
   return {
-    version: 3,
+    version: 4,
     users: [],
     projects: [],
     conversations: [],
@@ -256,12 +261,24 @@ export class XitStore {
         name: "Default Project",
         description: "Your default workspace",
         userId: DEMO_USER_ID,
-        systemPrompt:
-          "You are X-IT, a personal AI computer assistant. You can write files, run commands, run code, and drive a real browser — all inside an isolated sandbox. Prefer doing the work over describing it. Explain results briefly, and ask for approval when an action is destructive.",
+        systemPrompt: HOOLULU_BRAIN,
         settings: {},
         createdAt: ts,
         updatedAt: ts,
       });
+      this.dirty = true;
+    }
+    // v4 migration: upgrade projects still on the legacy default prompt to the Hoolulu Brain.
+    // Custom prompts (anything not exactly the legacy default) are left untouched.
+    if ((this.db.version ?? 0) < 4) {
+      for (const project of this.db.projects) {
+        if (project.systemPrompt === LEGACY_DEFAULT_PROJECT_PROMPT) {
+          project.systemPrompt = HOOLULU_BRAIN;
+          project.updatedAt = nowIso();
+          this.dirty = true;
+        }
+      }
+      this.db.version = 4;
       this.dirty = true;
     }
     if (this.dirty) this.persist();
