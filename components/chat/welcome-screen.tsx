@@ -1,6 +1,5 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import {
   Code2,
   FileText,
@@ -55,46 +54,55 @@ const STARTER_PROMPTS = [
 
 export function WelcomeScreen({ onSend }: WelcomeScreenProps) {
   return (
-    <div className="flex h-full flex-col items-center justify-center px-4">
-      <div className="w-full max-w-3xl text-center">
+    <div className="relative flex h-full flex-col items-center justify-center overflow-hidden px-4">
+      {/* Animated aurora backdrop */}
+      <div className="ss-aurora" aria-hidden />
+
+      <div className="relative w-full max-w-3xl text-center">
         {/* Logo & Title */}
-        <div className="mb-8">
-          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary shadow-lg">
-            <span className="text-2xl font-bold text-primary-foreground">X</span>
+        <div className="ss-rise mb-8">
+          <div className="ss-logo mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-[22px]">
+            <span className="text-3xl font-bold text-white">X</span>
           </div>
-          <h1 className="text-3xl font-bold">Welcome to X-IT</h1>
-          <p className="mt-2 text-muted-foreground">
-            Your personal AI computer assistant. I can write code, manage files, run
-            commands, browse the web, and build applications — all in an isolated
-            sandbox environment.
+          <h1 className="ss-gradient-text text-4xl font-bold tracking-tight">
+            Welcome to X-IT
+          </h1>
+          <p className="mx-auto mt-3 max-w-xl text-muted-foreground">
+            Your personal AI computer assistant. I can write code, manage files,
+            run commands, browse the web, and build applications — all in an
+            isolated sandbox environment.
           </p>
         </div>
 
         {/* Starter Prompts */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {STARTER_PROMPTS.map((item, i) => (
-            <Button
+            <button
               key={i}
-              variant="outline"
-              className="flex h-auto flex-col items-start gap-2 p-4 text-left"
+              type="button"
               onClick={() => onSend(item.prompt)}
+              className="ss-glow-card ss-rise flex h-auto flex-col items-start gap-2 p-4 text-left"
+              style={{ animationDelay: `${0.12 + i * 0.08}s` }}
             >
-              <div className="flex items-center gap-2 text-primary">
+              <span className="flex items-center gap-2 text-primary">
                 {item.icon}
-                <span className="font-medium">{item.title}</span>
-              </div>
-              <span className="text-xs text-muted-foreground line-clamp-2">
+                <span className="font-medium text-foreground">{item.title}</span>
+              </span>
+              <span className="line-clamp-2 text-xs text-muted-foreground">
                 {item.prompt}
               </span>
-            </Button>
+            </button>
           ))}
         </div>
 
         {/* Quick Tips */}
-        <div className="mt-8 text-xs text-muted-foreground">
+        <div
+          className="ss-rise mt-8 text-xs text-muted-foreground"
+          style={{ animationDelay: "0.7s" }}
+        >
           <p>
-            💡 Tip: I&apos;ll ask for your approval before running commands, writing files,
-            or performing any potentially destructive actions.
+            💡 Tip: I&apos;ll ask for your approval before running commands,
+            writing files, or performing any potentially destructive actions.
           </p>
         </div>
       </div>
